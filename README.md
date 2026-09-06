@@ -2,7 +2,7 @@
 
 [![Pinned version](https://img.shields.io/badge/OpenClaw-2026.9.2-111827)](#version-pin)
 [![Patch](https://img.shields.io/badge/patch-dummy%2Fdummy%20%7C%20dummy%2Fnote-2563eb)](patches/openclaw-2026.9.2-deterministic.patch)
-[![Image](https://img.shields.io/badge/image-openclaw--ephemeral--newest-0ea5e9)](https://github.com/users/safrano9999/packages/container/package/openclaw-ephemeral-newest)
+[![Image chain](https://img.shields.io/badge/images-Fedora%2044%20latest-0ea5e9)](https://github.com/safrano9999/CONTAINER-newest/blob/main/NEWEST.md)
 
 The independently maintained, exact deterministic gateway patch used by the
 Safrano OpenClaw newest image line. This repository is separate from the original
@@ -135,13 +135,16 @@ The distribution is intentionally split into three public repositories:
 |---|---|
 | [openclaw-deterministic-newest](https://github.com/safrano9999/openclaw-deterministic-newest) | This exact version-pinned patch |
 | [NOTE](https://github.com/safrano9999/NOTE) | Independent storage plugin for `dummy/note` |
-| [openclaw-ephemeral-newest](https://github.com/safrano9999/openclaw-ephemeral-newest) | Python startup configuration and image build |
+| [openclaw-ephemeral-newest](https://github.com/safrano9999/openclaw-ephemeral-newest) | Python startup configuration |
 
-The public image publication target is:
+The current image integration starts at
+[CONTAINER-newest](https://github.com/safrano9999/CONTAINER-newest)'s Core layer:
 
 ```text
-ghcr.io/safrano9999/openclaw-ephemeral-newest
+ghcr.io/safrano9999/fedora44-ai-core-latest:latest
 ```
+
+A standalone newest ephemeral image has not been published.
 
 ## License
 
