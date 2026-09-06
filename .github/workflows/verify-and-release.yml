@@ -1,11 +1,16 @@
 # Source of truth: SCRIPTS/githubactions. Generated copies are overwritten.
-name: openclaw-deterministic build_asset
+name: openclaw-deterministic-newest build_asset
 
 on:
   push:
     tags:
       - "20*.*.*"
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the verified release assets
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -67,11 +72,15 @@ jobs:
         shell: bash
         env:
           OPENCLAW_VERSION: ${{ steps.pins.outputs.version }}
+          OPENCLAW_UPSTREAM_SHA: ${{ steps.pins.outputs.upstream_sha }}
+          OPENCLAW_PNPM_VERSION: ${{ steps.pins.outputs.pnpm_version }}
           OPENCLAW_PATCH: ${{ steps.pins.outputs.patch }}
         run: |
           set -euo pipefail
           actual_version="$(node -p "require('./upstream/package.json').version")"
           test "$actual_version" = "$OPENCLAW_VERSION"
+          test "$(git -C upstream rev-parse HEAD)" = "$OPENCLAW_UPSTREAM_SHA"
+          node -e 'const pkg = require("./upstream/package.json"); if (pkg.packageManager.split("+")[0] !== `pnpm@${process.env.OPENCLAW_PNPM_VERSION}`) process.exit(1)'
           git -C upstream apply --check "$GITHUB_WORKSPACE/$OPENCLAW_PATCH"
           git -C upstream apply "$GITHUB_WORKSPACE/$OPENCLAW_PATCH"
 
@@ -95,18 +104,33 @@ jobs:
       - name: Run deterministic contract tests
         working-directory: upstream
         run: |
-          pnpm exec vitest run \
+          node scripts/run-vitest.mjs \
             src/agents/deterministic-gateway-model.test.ts \
             src/agents/mcp-transport-config.test.ts \
             src/agents/mcp-transport.test.ts \
             src/auto-reply/reply/directive-handling.defaults.test.ts \
-            src/auto-reply/reply/get-reply.before-agent-reply.test.ts \
+            src/auto-reply/reply/agent-runner-direct-runtime-config.test.ts \
+            src/plugins/before-agent-reply.test.ts \
+            src/agents/embedded-agent-runner/run.shared-integration.test.ts \
+            src/agents/model-catalog.test.ts \
+            src/agents/mcp-http-fetch.test.ts \
+            src/config/schema.test.ts \
+            test/scripts/runtime-postbuild.test.ts \
             src/commands/auth-choice.model-check.test.ts \
-            src/commands/model-picker.test.ts
+            src/commands/model-picker.test.ts --maxWorkers=4
 
       - name: Build OpenClaw
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
         working-directory: upstream
         run: pnpm build
+
+      - name: Verify built compatibility assets
+        working-directory: upstream
+        run: |
+          cmp src/agents/deterministic-gateway-replies.txt dist/deterministic-gateway-replies.txt
+          node openclaw.mjs --version
+          node scripts/check-package-dist-imports.mjs .
 
       - name: Package release assets
         shell: bash
@@ -121,14 +145,22 @@ jobs:
             | gzip -n > "artifacts/$DIST_ASSET"
           patch_asset="$(basename -- "$PATCH_FILE")"
           cp -- "$PATCH_FILE" "artifacts/$patch_asset"
+          cp build.conf artifacts/build.conf
           (
             cd artifacts
             sha256sum "$DIST_ASSET" > "$DIST_ASSET.sha256"
             sha256sum "$patch_asset" > "$patch_asset.sha256"
           )
 
+      - name: Upload verified build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openclaw-${{ steps.pins.outputs.version }}-deterministic
+          path: artifacts/
+          if-no-files-found: error
+
       - name: Publish version-pinned release
-        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/20')
+        if: inputs.publish == true || startsWith(github.ref, 'refs/tags/20')
         env:
           GH_TOKEN: ${{ github.token }}
           OPENCLAW_VERSION: ${{ steps.pins.outputs.version }}
@@ -152,7 +184,7 @@ jobs:
           fi
 
       - name: Publish latest release
-        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/20')
+        if: inputs.publish == true || startsWith(github.ref, 'refs/tags/20')
         env:
           GH_TOKEN: ${{ github.token }}
           OPENCLAW_VERSION: ${{ steps.pins.outputs.version }}
@@ -167,7 +199,7 @@ jobs:
             gh release edit "$tag" --title "$tag" --notes "$notes" --latest
           else
             gh release create "$tag" artifacts/* \
-              --verify-tag \
+              --target "$GITHUB_SHA" \
               --title "$tag" \
               --notes "$notes" \
               --latest

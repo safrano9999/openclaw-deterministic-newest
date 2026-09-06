@@ -1,0 +1,1507 @@
+diff --git a/scripts/lib/vitest-worker-compiler.mts b/scripts/lib/vitest-worker-compiler.mts
+index c9435531a72d321ac7d46f14eff31dfa5547f0cc..de41d3971cfa9a3457749438eda33c65b81bc863 100644
+--- a/scripts/lib/vitest-worker-compiler.mts
++++ b/scripts/lib/vitest-worker-compiler.mts
+@@ -124,6 +124,12 @@ async function compileVitestWorkerArtifacts(directory: string): Promise<void> {
+   for (const name of Object.keys(entry)) {
+     fs.accessSync(path.join(directory, "dist", `${name}.js`));
+   }
++  // Compiled subprocesses share the same operator-replaceable reply asset as dist builds.
++  const repliesSource = path.join(root, "src/agents/deterministic-gateway-replies.txt");
++  recordInput(repliesSource);
++  const replies = fs.readFileSync(repliesSource);
++  fs.writeFileSync(path.join(outDir, "deterministic-gateway-replies.txt"), replies, { flag: "wx" });
++  outputs["deterministic-gateway-replies.txt"] = hashVitestWorkerArtifact(replies);
+   const sortedInputs = Object.fromEntries(
+     Object.entries(inputs).toSorted(([a], [b]) => a.localeCompare(b)),
+   );
+diff --git a/scripts/runtime-postbuild.mts b/scripts/runtime-postbuild.mts
+index e6226449115a8a2c9cec6c0b92d858a0934fe072..ea33285bc3efccff59e90001f2d793c8860c2b7d 100644
+--- a/scripts/runtime-postbuild.mts
++++ b/scripts/runtime-postbuild.mts
+@@ -734,6 +734,12 @@ export function runRuntimePostBuild(params: RuntimePostBuildParams = {}) {
+   runPhase("bundled plugin metadata", () => copyBundledPluginMetadata(phaseParams));
+   runPhase("bundled hook metadata", () => copyHookMetadata(phaseParams));
+   runPhase("official channel catalog", () => writeOfficialChannelCatalog(phaseParams));
++  runPhase("deterministic gateway reply", () => {
++    fsImpl.copyFileSync(
++      path.join(rootDir, "src/agents/deterministic-gateway-replies.txt"),
++      path.join(rootDir, "dist/deterministic-gateway-replies.txt"),
++    );
++  });
+   runPhase("export HTML assets", () => copyExportHtmlTemplates(phaseParams));
+   runPhase("bundled plugin runtime overlay", () => stageBundledPluginRuntime(phaseParams));
+   runPhase("static extension assets", () => {
+diff --git a/src/agents/embedded-agent-runner/run.before-agent-reply-cron.test-support.ts b/src/agents/embedded-agent-runner/run.before-agent-reply-cron.test-support.ts
+index 405f35b3e64648055c1e273e0c97a3bab1aa6c81..e606b96eae582178b4f1cc69a79853b9fe3962f0 100644
+--- a/src/agents/embedded-agent-runner/run.before-agent-reply-cron.test-support.ts
++++ b/src/agents/embedded-agent-runner/run.before-agent-reply-cron.test-support.ts
+@@ -124,6 +124,21 @@ describe("runEmbeddedAgent before_agent_reply seam", () => {
+     expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(1);
+   });
+ 
++  it("returns the deterministic gateway reply without starting a model attempt", async () => {
++    const result = await runEmbeddedAgent({
++      ...createOverflowRunParams(state),
++      trigger: "user",
++      provider: "dummy",
++      model: "dummy",
++      prompt: "hello",
++    });
++    expect(result.payloads).toEqual([
++      { text: "Not a valid command. Use /tools to see available commands." },
++    ]);
++    expect(mockedRunEmbeddedAttempt).not.toHaveBeenCalled();
++    expect(result.meta.agentMeta).toMatchObject({ provider: "dummy", model: "dummy" });
++  });
++
+   it("forwards one-shot auxiliary-run flags and tool bindings into the embedded attempt", async () => {
+     // Auxiliary-run flags are request-scoped; they must pass through to the
+     // first attempt without becoming persistent session settings.
+diff --git a/src/agents/mcp-http-fetch.ts b/src/agents/mcp-http-fetch.ts
+index 0b8ae0f97770869073c295b9a68d03bd62607e97..736cad5e60445f71a1307a07e5b564dad2ea0b1c 100644
+--- a/src/agents/mcp-http-fetch.ts
++++ b/src/agents/mcp-http-fetch.ts
+@@ -8,6 +8,7 @@ import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
+ import { fetchWithSsrFGuard } from "../infra/net/fetch-guard.js";
+ import { wrapGuardedBodyStream } from "../infra/net/guarded-body-stream.js";
+ import {
++  mergeSsrFPolicies,
+   ssrfPolicyFromHttpBaseUrlAllowedOrigin,
+   type PinnedDispatcherPolicy,
+ } from "../infra/net/ssrf.js";
+@@ -94,6 +95,7 @@ async function buildManagedMcpResponse(
+ 
+ /** Builds an MCP fetch function with optional TLS/client-cert dispatcher support. */
+ export function buildMcpHttpFetch(params: {
++  allowPrivateNetwork?: boolean;
+   sslVerify?: boolean;
+   clientCert?: string;
+   clientKey?: string;
+@@ -103,9 +105,10 @@ export function buildMcpHttpFetch(params: {
+   const needsCustomDispatcher =
+     params.sslVerify === false || Boolean(params.clientCert || params.clientKey);
+   const scopedOrigin = params.resourceUrl ? new URL(params.resourceUrl).origin : undefined;
+-  const policy = params.resourceUrl
+-    ? ssrfPolicyFromHttpBaseUrlAllowedOrigin(params.resourceUrl)
+-    : undefined;
++  const policy = mergeSsrFPolicies(
++    params.resourceUrl ? ssrfPolicyFromHttpBaseUrlAllowedOrigin(params.resourceUrl) : undefined,
++    params.allowPrivateNetwork === true ? { allowPrivateNetwork: true } : undefined,
++  );
+ 
+   let customConnect: Record<string, unknown> | undefined;
+   const resolveCustomDispatcherPolicy = (url: URL): PinnedDispatcherPolicy | undefined => {
+diff --git a/src/agents/mcp-transport-config.test.ts b/src/agents/mcp-transport-config.test.ts
+index 02b53d6d6601fed7ece8747bf4640cac4c570880..8f5b40b5a062d556cdb2c2b1b3bdc5b247fce727 100644
+--- a/src/agents/mcp-transport-config.test.ts
++++ b/src/agents/mcp-transport-config.test.ts
+@@ -273,6 +273,7 @@ describe("resolveMcpTransportConfig", () => {
+     const resolved = resolveMcpTransportConfig("probe", {
+       url: "https://mcp.example.com/http",
+       transport: "streamable-http",
++      allowPrivateNetwork: true,
+     });
+ 
+     expect(resolved).toEqual({
+@@ -280,6 +281,7 @@ describe("resolveMcpTransportConfig", () => {
+       transportType: "streamable-http",
+       url: "https://mcp.example.com/http",
+       headers: undefined,
++      allowPrivateNetwork: true,
+       description: "https://mcp.example.com/http",
+       connectionTimeoutMs: 30_000,
+       requestTimeoutMs: 60_000,
+@@ -287,6 +289,18 @@ describe("resolveMcpTransportConfig", () => {
+     });
+   });
+ 
++  it.each([undefined, false, "true", 1])(
++    "does not opt into private networking for %s",
++    (allowPrivateNetwork) => {
++      const resolved = resolveMcpTransportConfig("probe", {
++        url: "https://mcp.example.com/http",
++        transport: "streamable-http",
++        allowPrivateNetwork,
++      });
++      expect(resolved).not.toHaveProperty("allowPrivateNetwork");
++    },
++  );
++
+   it("treats CLI-native http type as streamable HTTP for compatibility", () => {
+     const resolved = resolveMcpTransportConfig("probe", {
+       url: "https://mcp.example.com/http",
+diff --git a/src/agents/mcp-transport-config.ts b/src/agents/mcp-transport-config.ts
+index fe82ef7e067cb9673c30216a66257f6c2807f71c..47754de93122b3189f90fd2973e725632043d037 100644
+--- a/src/agents/mcp-transport-config.ts
++++ b/src/agents/mcp-transport-config.ts
+@@ -54,6 +54,7 @@ type ResolvedHttpMcpTransportConfig = ResolvedBaseMcpTransportConfig & {
+   headers?: Record<string, string>;
+   auth?: "oauth";
+   oauth?: ResolvedMcpOAuthConfig;
++  allowPrivateNetwork?: boolean;
+   sslVerify?: boolean;
+   clientCert?: string;
+   clientKey?: string;
+@@ -202,6 +203,9 @@ function resolveHttpTransportConfig(
+     !Array.isArray((rawServer as { oauth?: unknown }).oauth)
+       ? { oauth: (rawServer as { oauth: ResolvedMcpOAuthConfig }).oauth }
+       : {}),
++    ...(getBooleanField(rawServer, ["allowPrivateNetwork"]) === true
++      ? { allowPrivateNetwork: true }
++      : {}),
+     ...(getBooleanField(rawServer, ["sslVerify"]) !== undefined
+       ? { sslVerify: getBooleanField(rawServer, ["sslVerify"]) }
+       : {}),
+diff --git a/src/agents/mcp-transport.test.ts b/src/agents/mcp-transport.test.ts
+index d9bd6a817ac71562bddd2894280b170c6c89dcb2..69ac876e1820111867b395d55bcd28b4fb09febe 100644
+--- a/src/agents/mcp-transport.test.ts
++++ b/src/agents/mcp-transport.test.ts
+@@ -190,6 +190,24 @@ describe("resolveMcpTransport", () => {
+     expect(runtimeFetchMock).toHaveBeenCalledTimes(1);
+   });
+ 
++  it("allows private network targets only when the server opts in", async () => {
++    lookupMock.mockResolvedValue([{ address: "169.254.1.2", family: 4 }]);
++    runtimeFetchMock.mockResolvedValueOnce(new Response("ok"));
++
++    resolveMcpTransport("probe", {
++      url: "http://host.containers.internal:4000/mcp",
++      transport: "streamable-http",
++      allowPrivateNetwork: true,
++    });
++
++    await expect(
++      latestStreamableFetch()("http://host.containers.internal:4000/mcp"),
++    ).resolves.toMatchObject({ status: 200 });
++
++    expect(runtimeFetchMock).toHaveBeenCalledTimes(1);
++    expect(runtimeFetchCall(0)?.[0]).toBe("http://host.containers.internal:4000/mcp");
++  });
++
+   it("preserves replayable request bodies for cross-origin streamable HTTP redirects", async () => {
+     // 307/308 redirects preserve method/body, while custom auth headers are
+     // still stripped when the destination origin changes.
+diff --git a/src/agents/mcp-transport.ts b/src/agents/mcp-transport.ts
+index 59c9792eb3864a8fc9d02b95efae3b53954b215e..e3b2b024b69a3464d66d3c3c34a74d7bcdeb28c1 100644
+--- a/src/agents/mcp-transport.ts
++++ b/src/agents/mcp-transport.ts
+@@ -169,6 +169,7 @@ export function resolveMcpTransport(
+   // The SDK reuses one fetch for OAuth and long-lived SSE/streamable bodies.
+   // Per-RPC deadlines belong to client calls, not this transport fetch.
+   const baseFetch = buildMcpHttpFetch({
++    allowPrivateNetwork: resolved.allowPrivateNetwork,
+     sslVerify: resolved.sslVerify,
+     clientCert: resolved.clientCert,
+     clientKey: resolved.clientKey,
+diff --git a/src/agents/model-catalog.test.ts b/src/agents/model-catalog.test.ts
+index 3ae8f5aee31341ebb74abe5a9552b8a0f5c5db71..4923a1c2fc56aef7b4d220c226cc734d649db588 100644
+--- a/src/agents/model-catalog.test.ts
++++ b/src/agents/model-catalog.test.ts
+@@ -84,6 +84,19 @@ async function build(params: {
+ }
+ 
+ describe("prepared model catalog builder", () => {
++  it("keeps both deterministic models available without provider metadata or credentials", async () => {
++    const expected = [
++      { provider: "dummy", id: "dummy", name: "Deterministic gateway" },
++      { provider: "dummy", id: "note", name: "Deterministic NOTE" },
++    ];
++    const snapshot = await build({});
++    expect(snapshot.entries).toEqual(expected);
++    expect(snapshot.routeVariants).toEqual(expected);
++    expect(
++      loadManifestModelCatalog({ config: { plugins: { enabled: false } }, metadataSnapshot }),
++    ).toEqual(expected);
++  });
++
+   beforeEach(() => {
+     mocks.augmentModelCatalogWithProviderPlugins.mockReset();
+     mocks.augmentModelCatalogWithProviderPlugins.mockResolvedValue([]);
+@@ -107,6 +120,8 @@ describe("prepared model catalog builder", () => {
+     expect(snapshot.entries.map((entry) => `${entry.provider}/${entry.id}`)).toEqual([
+       "alpha/a",
+       "beta/z",
++      "dummy/dummy",
++      "dummy/note",
+     ]);
+     expect(snapshot.entries[0]?.thinkingLevelMap).toEqual({ off: null, max: "max" });
+     expect(snapshot.routeVariants).toEqual(snapshot.entries);
+@@ -120,7 +135,12 @@ describe("prepared model catalog builder", () => {
+       ],
+     });
+ 
+-    expect(snapshot.entries.map((entry) => entry.id)).toEqual(["model-a", "model-b"]);
++    expect(snapshot.entries.map((entry) => entry.id)).toEqual([
++      "model-a",
++      "model-b",
++      "dummy",
++      "note",
++    ]);
+     expect(snapshot.entries.every((entry) => entry.providerOrder === undefined)).toBe(true);
+   });
+ 
+@@ -136,12 +156,20 @@ describe("prepared model catalog builder", () => {
+       config,
+       metadataSnapshot: runtimeManifest,
+     });
+-    expect(declaredManifestModels.map((entry) => entry.id)).toEqual(["gpt-5.5", "gpt-5.6"]);
++    expect(declaredManifestModels.map((entry) => entry.id)).toEqual([
++      "gpt-5.5",
++      "gpt-5.6",
++      "dummy",
++      "note",
++    ]);
+ 
+     const snapshot = await build({ config, metadataSnapshot: runtimeManifest });
+ 
+-    expect(snapshot.entries).toEqual([]);
+-    expect(snapshot.routeVariants).toEqual([]);
++    expect(snapshot.entries).toEqual([
++      { provider: "dummy", id: "dummy", name: "Deterministic gateway" },
++      { provider: "dummy", id: "note", name: "Deterministic NOTE" },
++    ]);
++    expect(snapshot.routeVariants).toEqual(snapshot.entries);
+     expect(loadManifestModelCatalog({ config, metadataSnapshot: runtimeManifest })).toBe(
+       declaredManifestModels,
+     );
+@@ -254,9 +282,13 @@ describe("prepared model catalog builder", () => {
+     });
+ 
+     expect(snapshot.entries.map((entry) => `${entry.provider}/${entry.id}`)).toEqual([
++      "dummy/dummy",
++      "dummy/note",
+       "openai/gpt-5.5",
+     ]);
+     expect(snapshot.routeVariants.map((entry) => `${entry.provider}/${entry.id}`)).toEqual([
++      "dummy/dummy",
++      "dummy/note",
+       "openai/gpt-5.5",
+     ]);
+   });
+@@ -278,6 +310,8 @@ describe("prepared model catalog builder", () => {
+     });
+ 
+     expect(snapshot.entries.map((entry) => entry.id)).toEqual([
++      "dummy",
++      "note",
+       "gpt-5.6-sol",
+       "gpt-5.6-terra",
+       "gpt-5.6-luna",
+@@ -300,6 +334,8 @@ describe("prepared model catalog builder", () => {
+     });
+ 
+     expect(snapshot.entries.map((entry) => `${entry.provider}/${entry.id}`)).toEqual([
++      "dummy/dummy",
++      "dummy/note",
+       "moonshot/kimi-k3",
+       "moonshot/kimi-k2.7-code",
+     ]);
+@@ -323,10 +359,14 @@ describe("prepared model catalog builder", () => {
+ 
+     expect(mocks.augmentModelCatalogWithProviderPlugins).toHaveBeenCalledOnce();
+     expect(snapshot.entries.map((entry) => `${entry.provider}/${entry.id}`)).toEqual([
++      "dummy/dummy",
++      "dummy/note",
+       "openai/gpt-5.5",
+     ]);
+-    expect(snapshot.entries[0]?.contextWindow).toBe(128_000);
++    expect(snapshot.entries[2]?.contextWindow).toBe(128_000);
+     expect(snapshot.routeVariants.map((entry) => `${entry.provider}/${entry.id}`)).toEqual([
++      "dummy/dummy",
++      "dummy/note",
+       "openai/gpt-5.5",
+     ]);
+   });
+@@ -355,6 +395,8 @@ describe("prepared model catalog builder", () => {
+     });
+ 
+     expect(snapshot.entries.map((entry) => entry.id)).toEqual([
++      "dummy",
++      "note",
+       "gpt-5.6-sol",
+       "gpt-5.6-terra",
+       "gpt-5.6-luna",
+@@ -400,7 +442,12 @@ describe("prepared model catalog builder", () => {
+       readOnly: false,
+     });
+ 
+-    expect(snapshot.entries.map((entry) => entry.id)).toEqual(["gpt-5.6-sol", "gpt-5.4"]);
++    expect(snapshot.entries.map((entry) => entry.id)).toEqual([
++      "dummy",
++      "note",
++      "gpt-5.6-sol",
++      "gpt-5.4",
++    ]);
+   });
+ 
+   it("preserves explicitly configured runtime-provider models", async () => {
+@@ -449,6 +496,8 @@ describe("prepared model catalog builder", () => {
+     });
+ 
+     expect(snapshot.entries.map((entry) => `${entry.provider}/${entry.id}`)).toEqual([
++      "dummy/dummy",
++      "dummy/note",
+       "openai/gpt-5.5",
+       "openai/gpt-5.4",
+     ]);
+@@ -484,6 +533,8 @@ describe("prepared model catalog builder", () => {
+       });
+ 
+       expect(snapshot.entries).toMatchObject([
++        { provider: "dummy", id: "dummy", name: "Deterministic gateway" },
++        { provider: "dummy", id: "note", name: "Deterministic NOTE" },
+         { provider: "manifest-provider", id: "manifest-model" },
+       ]);
+     },
+@@ -504,6 +555,8 @@ describe("prepared model catalog builder", () => {
+     });
+ 
+     expect(snapshot.entries.map((entry) => `${entry.provider}/${entry.id}`)).toEqual([
++      "dummy/dummy",
++      "dummy/note",
+       "manifest-provider/manifest-model",
+       "manifest-provider/synthetic-model",
+     ]);
+@@ -555,7 +608,7 @@ describe("prepared model catalog builder", () => {
+       thinkingLevelMap: { off: null, xhigh: "xhigh" },
+       input: ["text", "image"],
+     });
+-    expect(snapshot.routeVariants).toHaveLength(2);
++    expect(snapshot.routeVariants).toHaveLength(4);
+   });
+ 
+   it.each([false, true])(
+@@ -673,7 +726,7 @@ describe("prepared model catalog builder", () => {
+       },
+     });
+ 
+-    expect(snapshot.entries.map((entry) => entry.id)).toEqual(["configured-only"]);
++    expect(snapshot.entries.map((entry) => entry.id)).toEqual(["configured-only", "dummy", "note"]);
+   });
+ 
+   it("rejects the whole generation when catalog projection fails after a valid row", async () => {
+@@ -717,6 +770,8 @@ describe("prepared model catalog builder", () => {
+     });
+ 
+     expect(snapshot.entries).toEqual([
++      { provider: "dummy", id: "dummy", name: "Deterministic gateway" },
++      { provider: "dummy", id: "note", name: "Deterministic NOTE" },
+       expect.objectContaining({ id: "gpt-5.5", provider: "openai" }),
+     ]);
+     expect(mocks.augmentModelCatalogWithProviderPlugins).not.toHaveBeenCalled();
+diff --git a/src/agents/model-catalog.ts b/src/agents/model-catalog.ts
+index c397c686b67d6618e59376adb3feefb614a3498a..4523611bcd5058b6ed5d98cfdad112dd4cda9bf7 100644
+--- a/src/agents/model-catalog.ts
++++ b/src/agents/model-catalog.ts
+@@ -17,6 +17,11 @@ import { resolvePluginMetadataSnapshot } from "../plugins/plugin-metadata-snapsh
+ import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.types.js";
+ import { augmentModelCatalogWithProviderPlugins } from "../plugins/provider-runtime.runtime.js";
+ import { createLazyPromise } from "../shared/lazy-promise.js";
++import {
++  DETERMINISTIC_GATEWAY_MODEL,
++  DETERMINISTIC_GATEWAY_PROVIDER,
++  DETERMINISTIC_NOTE_MODEL,
++} from "./deterministic-gateway-model.js";
+ import { modelCatalogRowToEntry } from "./model-catalog-entry.js";
+ import { modelSupportsInput as modelCatalogEntrySupportsInput } from "./model-catalog-lookup.js";
+ import { assignProviderModelOrder, compareModelCatalogEntries } from "./model-catalog-order.js";
+@@ -348,8 +353,8 @@ function createModelCatalogSnapshot(
+   routeVariants: ModelCatalogRouteVariantCollector,
+ ): ModelCatalogSnapshot {
+   return {
+-    entries: sortModelCatalogEntries(entries),
+-    routeVariants: sortModelCatalogEntries(routeVariants.entries),
++    entries: sortModelCatalogEntries(withDeterministicModelCatalog(entries)),
++    routeVariants: sortModelCatalogEntries(withDeterministicModelCatalog(routeVariants.entries)),
+   };
+ }
+ 
+@@ -368,6 +373,21 @@ function resolveEligibleManifestCatalogPlugins(
+   );
+ }
+ 
++function withDeterministicModelCatalog(entries: ModelCatalogEntry[]): ModelCatalogEntry[] {
++  const result = [...entries];
++  for (const [id, name] of [
++    [DETERMINISTIC_GATEWAY_MODEL, "Deterministic gateway"],
++    [DETERMINISTIC_NOTE_MODEL, "Deterministic NOTE"],
++  ] as const) {
++    if (
++      !result.some((entry) => entry.provider === DETERMINISTIC_GATEWAY_PROVIDER && entry.id === id)
++    ) {
++      result.push({ provider: DETERMINISTIC_GATEWAY_PROVIDER, id, name });
++    }
++  }
++  return result;
++}
++
+ export function loadManifestModelCatalog(params: {
+   config: OpenClawConfig;
+   workspaceDir?: string;
+@@ -391,7 +411,7 @@ export function loadManifestModelCatalog(params: {
+           allowWorkspaceScopedCurrent: params.workspaceDir === undefined,
+         }));
+   if (!resolvedSnapshot) {
+-    return [];
++    return withDeterministicModelCatalog([]);
+   }
+   const cached = manifestModelCatalogCache.get(params.config);
+   if (cached?.snapshot === resolvedSnapshot) {
+@@ -415,14 +435,16 @@ export function loadManifestModelCatalog(params: {
+       });
+     }
+   }
+-  const rows = plan.rows.map((row) => {
+-    const entry = modelCatalogRowToEntry(row);
+-    const providerOrder = providerOrderByKey.get(catalogEntryDedupeKey(row.provider, row.id));
+-    if (providerOrder !== undefined) {
+-      entry.providerOrder = providerOrder;
+-    }
+-    return entry;
+-  });
++  const rows = withDeterministicModelCatalog(
++    plan.rows.map((row) => {
++      const entry = modelCatalogRowToEntry(row);
++      const providerOrder = providerOrderByKey.get(catalogEntryDedupeKey(row.provider, row.id));
++      if (providerOrder !== undefined) {
++        entry.providerOrder = providerOrder;
++      }
++      return entry;
++    }),
++  );
+   manifestModelCatalogCache.set(params.config, { snapshot: resolvedSnapshot, rows });
+   return rows;
+ }
+diff --git a/src/auto-reply/reply/agent-runner-direct-runtime-config.test.ts b/src/auto-reply/reply/agent-runner-direct-runtime-config.test.ts
+index 262bdb105cdf752c9b35e307661887771cd7d74f..9bffa4f2ef8b7758b628ab4d780f5cf50d373cca 100644
+--- a/src/auto-reply/reply/agent-runner-direct-runtime-config.test.ts
++++ b/src/auto-reply/reply/agent-runner-direct-runtime-config.test.ts
+@@ -306,6 +306,19 @@ describe("runReplyAgent runtime config", () => {
+     expect(preflightCall.followupRun).toBe(followupRun);
+   });
+ 
++  it.each(["dummy", "note"])("skips model-backed maintenance for dummy/%s", async (model) => {
++    const { followupRun, replyParams } = createDirectRuntimeReplyParams({
++      shouldFollowup: false,
++      isActive: false,
++    });
++    followupRun.run.provider = "dummy";
++    followupRun.run.model = model;
++    await expect(runReplyAgent(replyParams)).resolves.toEqual({ text: "main reply" });
++    expect(runMemoryFlushIfNeededMock).not.toHaveBeenCalled();
++    expect(runSessionCompactionIfNeededMock).not.toHaveBeenCalled();
++    expect(executeAgentTurnMock).toHaveBeenCalledOnce();
++  });
++
+   it("passes the derived runtime-policy key to pre-run maintenance", async () => {
+     const { followupRun, replyParams } = createDirectRuntimeReplyParams({
+       shouldFollowup: false,
+diff --git a/src/auto-reply/reply/agent-runner-execute.ts b/src/auto-reply/reply/agent-runner-execute.ts
+index 19091e54737844d5cd92470ec48b8dd109525b1e..d15a3f98f2dfc574cb64be7d226b51380d3ef835 100644
+--- a/src/auto-reply/reply/agent-runner-execute.ts
++++ b/src/auto-reply/reply/agent-runner-execute.ts
+@@ -1,5 +1,6 @@
+ import crypto from "node:crypto";
+ import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
++import { isDeterministicGatewayModel } from "../../agents/deterministic-gateway-model.js";
+ import { prepareGitCoauthorAttribution } from "../../agents/git-coauthor-attribution.js";
+ import type { OpenClawConfig } from "../../config/config.js";
+ import type { SessionEntry } from "../../config/sessions.js";
+@@ -187,31 +188,39 @@ export async function executePreparedReplyAgentRun(
+ 
+   await typingSignals.signalRunStart();
+ 
++  // Deterministic turns never invoke a maintenance model, even when one is configured.
++  const deterministic = isDeterministicGatewayModel(
++    followupRun.run.provider,
++    followupRun.run.model,
++  );
++
+   // Preserve the one-flush-per-compaction-cycle gate: an earlier same-cycle
+   // flush is the checkpoint for this upcoming compaction, not a reason to rerun maintenance.
+-  const memoryFlushResult = await traceAgentPhase("reply.memory_flush", () =>
+-    runMemoryFlushIfNeeded({
+-      cfg,
+-      followupRun,
+-      promptForEstimate: followupRun.prompt,
+-      sessionCtx,
+-      opts,
+-      defaultModel,
+-      resolvedVerboseLevel,
+-      sessionEntry: activeSessionEntry,
+-      sessionStore: activeSessionStore,
+-      sessionKey,
+-      runtimePolicySessionKey,
+-      storePath,
+-      isHeartbeat,
+-      replyOperation,
+-      onVisibleErrorPayloads: (payloads) => {
+-        logVerbose(
+-          `memory flush produced ${payloads.length} visible maintenance error payload(s); continuing user reply`,
+-        );
+-      },
+-    }),
+-  );
++  const memoryFlushResult = deterministic
++    ? { sessionEntry: activeSessionEntry, outcome: "skipped" as const }
++    : await traceAgentPhase("reply.memory_flush", () =>
++        runMemoryFlushIfNeeded({
++          cfg,
++          followupRun,
++          promptForEstimate: followupRun.prompt,
++          sessionCtx,
++          opts,
++          defaultModel,
++          resolvedVerboseLevel,
++          sessionEntry: activeSessionEntry,
++          sessionStore: activeSessionStore,
++          sessionKey,
++          runtimePolicySessionKey,
++          storePath,
++          isHeartbeat,
++          replyOperation,
++          onVisibleErrorPayloads: (payloads) => {
++            logVerbose(
++              `memory flush produced ${payloads.length} visible maintenance error payload(s); continuing user reply`,
++            );
++          },
++        }),
++      );
+   activeSessionEntry = memoryFlushResult.sessionEntry;
+   setActiveSessionEntry(activeSessionEntry);
+ 
+@@ -220,24 +229,26 @@ export async function executePreparedReplyAgentRun(
+   }
+ 
+   const prePreflightCompactionCount = activeSessionEntry?.compactionCount ?? 0;
+-  activeSessionEntry = await traceAgentPhase("reply.preflight_compaction", () =>
+-    runSessionCompactionIfNeeded({
+-      cfg,
+-      followupRun,
+-      promptForEstimate: followupRun.prompt,
+-      defaultModel,
+-      sessionEntry: activeSessionEntry,
+-      sessionStore: activeSessionStore,
+-      sessionKey,
+-      runtimePolicySessionKey,
+-      storePath,
+-      isHeartbeat,
+-      abortSignal: replyOperation.abortSignal,
+-      onCompactionStart: () => replyOperation.setPhase("preflight_compacting"),
+-      onSessionIdChanged: (sessionId) => replyOperation.updateSessionId(sessionId),
+-      onCompactionNotice: sendDirectCompactionNotice,
+-    }),
+-  );
++  activeSessionEntry = deterministic
++    ? activeSessionEntry
++    : await traceAgentPhase("reply.preflight_compaction", () =>
++        runSessionCompactionIfNeeded({
++          cfg,
++          followupRun,
++          promptForEstimate: followupRun.prompt,
++          defaultModel,
++          sessionEntry: activeSessionEntry,
++          sessionStore: activeSessionStore,
++          sessionKey,
++          runtimePolicySessionKey,
++          storePath,
++          isHeartbeat,
++          abortSignal: replyOperation.abortSignal,
++          onCompactionStart: () => replyOperation.setPhase("preflight_compacting"),
++          onSessionIdChanged: (sessionId) => replyOperation.updateSessionId(sessionId),
++          onCompactionNotice: sendDirectCompactionNotice,
++        }),
++      );
+   setActiveSessionEntry(activeSessionEntry);
+   const preflightCompactionApplied =
+     (activeSessionEntry?.compactionCount ?? 0) > prePreflightCompactionCount;
+@@ -274,6 +285,7 @@ export async function executePreparedReplyAgentRun(
+   await turnAdoptionLifecycle?.onAdopted();
+   const runOutcome = await withBeforeAgentReplyObserver(
+     {
++      inboundContext: sessionCtx,
+       beforeDispatch: async () => {
+         return await beginBeforeAgentReply();
+       },
+diff --git a/src/commands/auth-choice.model-check.test.ts b/src/commands/auth-choice.model-check.test.ts
+index fca0a529b7ccca210ce15f1dfe67baa5b6c815bb..25222d3718e3b0ec31f753c934c3909ee9dfa0a2 100644
+--- a/src/commands/auth-choice.model-check.test.ts
++++ b/src/commands/auth-choice.model-check.test.ts
+@@ -85,6 +85,21 @@ describe("warnIfModelConfigLooksOff", () => {
+     );
+   });
+ 
++  it.each(["dummy", "note"])("requires neither discovery nor auth for dummy/%s", async (model) => {
++    const note = vi.fn(async (_message: string) => {});
++    const config: OpenClawConfig = { agents: { defaults: { model: `dummy/${model}` } } };
++    expect(resolveDefaultModelAuthStatus(config)).toEqual({
++      provider: "dummy",
++      model,
++      status: "ready",
++      hasAuth: true,
++    });
++    await warnIfModelConfigLooksOff(config, makePrompter({ note }));
++    expect(loadModelCatalog).not.toHaveBeenCalled();
++    expect(ensureAuthProfileStore).not.toHaveBeenCalled();
++    expect(note).not.toHaveBeenCalled();
++  });
++
+   it("reports missing auth for generic providers without credential evidence", () => {
+     const config = {
+       agents: { defaults: { model: "anthropic/claude-sonnet-4-6" } },
+diff --git a/src/commands/auth-choice.model-check.ts b/src/commands/auth-choice.model-check.ts
+index 6e620a2588bbe2c5679550409ec464b58e61cba7..f8ccbc9921fca118fd7da1c03e42c9bcc7334c58 100644
+--- a/src/commands/auth-choice.model-check.ts
++++ b/src/commands/auth-choice.model-check.ts
+@@ -7,6 +7,7 @@ import {
+   resolveDefaultAgentId,
+ } from "../agents/agent-scope.js";
+ import { ensureAuthProfileStore } from "../agents/auth-profiles.js";
++import { isDeterministicGatewayModel } from "../agents/deterministic-gateway-model.js";
+ import { createModelAuthAvailabilityResolver } from "../agents/model-auth-availability.js";
+ import type { ModelCatalogEntry } from "../agents/model-catalog.js";
+ import { resolveDefaultModelForAgent } from "../agents/model-selection.js";
+@@ -60,6 +61,9 @@ export function resolveDefaultModelAuthStatus(
+     cfg: config,
+     agentId: options?.agentId,
+   });
++  if (isDeterministicGatewayModel(ref.provider, ref.model)) {
++    return { provider: ref.provider, model: ref.model, status: "ready", hasAuth: true };
++  }
+   const store = ensureAuthProfileStore(options?.agentDir, {
+     allowKeychainPrompt: false,
+     config,
+@@ -170,6 +174,9 @@ export async function warnIfModelConfigLooksOff(
+     cfg: config,
+     agentId: options?.agentId,
+   });
++  if (isDeterministicGatewayModel(ref.provider, ref.model)) {
++    return;
++  }
+   const warnings: string[] = [];
+   const validationAgentId = options?.agentId ?? resolveDefaultAgentId(config);
+   const snapshot =
+diff --git a/src/commands/model-picker.test.ts b/src/commands/model-picker.test.ts
+index 32716b03396377321117b5578dc8a96b9e5c23ea..fae58622db298b5099f42de0812f37f8fc5b3668 100644
+--- a/src/commands/model-picker.test.ts
++++ b/src/commands/model-picker.test.ts
+@@ -420,6 +420,32 @@ afterEach(() => {
+ });
+ 
+ describe("promptDefaultModel", () => {
++  it.each(["dummy/dummy", "dummy/note"])(
++    "selects %s without provider setup even with no catalog",
++    async (model) => {
++      loadModelCatalog.mockResolvedValue([]);
++      const select = vi.fn(async () => model);
++      const result = await promptDefaultPicker({ config: {}, prompter: makePrompter({ select }) });
++      expect(result).toEqual({ model });
++      const values = pickerOptions(select as MockCallSource).map((option) => option.value);
++      expect(values.filter((value) => value === "dummy/dummy")).toHaveLength(1);
++      expect(values.filter((value) => value === "dummy/note")).toHaveLength(1);
++      expect(runProviderModelSelectedHook).not.toHaveBeenCalled();
++    },
++  );
++
++  it("does not duplicate deterministic choices already present in the catalog", async () => {
++    loadModelCatalog.mockResolvedValue([
++      { provider: "dummy", id: "dummy", name: "Gateway" },
++      { provider: "dummy", id: "note", name: "NOTE" },
++    ]);
++    const select = vi.fn(async () => "dummy/note");
++    await promptDefaultPicker({ config: {}, prompter: makePrompter({ select }) });
++    const values = pickerOptions(select as MockCallSource).map((option) => option.value);
++    expect(values.filter((value) => value === "dummy/dummy")).toHaveLength(1);
++    expect(values.filter((value) => value === "dummy/note")).toHaveLength(1);
++  });
++
+   it("adds runtime-route hints for canonical OpenAI models", async () => {
+     loadModelCatalog.mockResolvedValue([
+       {
+@@ -543,7 +569,11 @@ describe("promptDefaultModel", () => {
+     expect(option.hint).toContain("ChatGPT GPT-5.5");
+     expect(option.hint).toContain("ctx 400k");
+     expect(option.hint).not.toContain("reasoning");
+-    expect(optionValues(pickerOptions(select as MockCallSource))).toEqual(["openai/gpt-5.5"]);
++    expect(optionValues(pickerOptions(select as MockCallSource))).toEqual([
++      "openai/gpt-5.5",
++      "dummy/dummy",
++      "dummy/note",
++    ]);
+   });
+ 
+   it("hides unauthenticated catalog entries from default model choices", async () => {
+@@ -562,7 +592,7 @@ describe("promptDefaultModel", () => {
+     });
+ 
+     const values = optionValues(pickerOptions(select as MockCallSource));
+-    expect(values).toEqual(["anthropic/claude-sonnet-4-6"]);
++    expect(values).toEqual(["anthropic/claude-sonnet-4-6", "dummy/dummy", "dummy/note"]);
+   });
+ 
+   it("does not offer an OpenAI row with a conflicting API and endpoint", async () => {
+@@ -587,6 +617,8 @@ describe("promptDefaultModel", () => {
+ 
+     expect(optionValues(pickerOptions(select as MockCallSource))).toEqual([
+       "anthropic/claude-sonnet-4-6",
++      "dummy/dummy",
++      "dummy/note",
+     ]);
+     const checker = createProviderAuthChecker.mock.results.at(-1)?.value;
+     expect(checker).toHaveBeenCalledWith("openai", {
+@@ -612,7 +644,11 @@ describe("promptDefaultModel", () => {
+     });
+ 
+     const values = optionValues(pickerOptions(select as MockCallSource));
+-    expect(values).toEqual(["amazon-bedrock/us.anthropic.claude-sonnet-4-5"]);
++    expect(values).toEqual([
++      "amazon-bedrock/us.anthropic.claude-sonnet-4-5",
++      "dummy/dummy",
++      "dummy/note",
++    ]);
+   });
+ 
+   it("shows AWS SDK models but hides unresolved non-OpenAI SecretRefs", async () => {
+@@ -651,6 +687,8 @@ describe("promptDefaultModel", () => {
+ 
+     expect(optionValues(pickerOptions(select as MockCallSource))).toEqual([
+       "amazon-bedrock/us.anthropic.claude-sonnet-4-5",
++      "dummy/dummy",
++      "dummy/note",
+     ]);
+     const authChecker = createProviderAuthChecker.mock.results.at(-1)?.value;
+     if (!authChecker) {
+@@ -691,6 +729,8 @@ describe("promptDefaultModel", () => {
+       "openai/gpt-5.5",
+       "anthropic/claude-sonnet-4-6",
+       "google/gemini-3.1-pro-preview",
++      "dummy/dummy",
++      "dummy/note",
+     ]);
+   });
+ 
+@@ -710,6 +750,8 @@ describe("promptDefaultModel", () => {
+     expect(result.model).toBe("google/gemini-3.1-pro-preview");
+     expect(optionValues(pickerOptions(select as MockCallSource))).toEqual([
+       "google/gemini-3.1-pro-preview",
++      "dummy/dummy",
++      "dummy/note",
+     ]);
+     expect(
+       requireRecord(
+@@ -890,7 +932,13 @@ describe("promptDefaultModel", () => {
+     expect(params.searchable).toBe(false);
+     expect(params.initialValue).toBe("__keep__");
+     const options = pickerOptions(select as MockCallSource);
+-    expect(optionValues(options)).toEqual(["__keep__", "__manual__", "__browse__"]);
++    expect(optionValues(options)).toEqual([
++      "__keep__",
++      "__manual__",
++      "__browse__",
++      "dummy/dummy",
++      "dummy/note",
++    ]);
+     expect(requireOption(options, "__keep__").label).toBe(
+       "Keep current (nvidia/nvidia/nemotron-3-super-120b-a12b)",
+     );
+@@ -925,6 +973,8 @@ describe("promptDefaultModel", () => {
+       "__keep__",
+       "__manual__",
+       "__browse__",
++      "dummy/dummy",
++      "dummy/note",
+     ]);
+   });
+ 
+@@ -957,6 +1007,8 @@ describe("promptDefaultModel", () => {
+       "__keep__",
+       "__manual__",
+       "__browse__",
++      "dummy/dummy",
++      "dummy/note",
+     ]);
+   });
+ 
+@@ -1124,6 +1176,8 @@ describe("promptDefaultModel", () => {
+     expect(optionValues(pickerOptions(select as MockCallSource))).toEqual([
+       "nvidia/nemotron-3-super-120b-a12b",
+       "nvidia/moonshotai/kimi-k2.5",
++      "dummy/dummy",
++      "dummy/note",
+     ]);
+   });
+ 
+@@ -1157,6 +1211,8 @@ describe("promptDefaultModel", () => {
+       "nvidia/z-ai/glm-5.1",
+       "nvidia/nemotron-3-super-120b-a12b",
+       "nvidia/nemotron-3-ultra-550b-a55b",
++      "dummy/dummy",
++      "dummy/note",
+     ]);
+     expect(
+       requireOption(pickerOptions(select as MockCallSource), "nvidia/nemotron-3-ultra-550b-a55b")
+@@ -1254,6 +1310,8 @@ describe("promptDefaultModel", () => {
+       "nvidia/nemotron-3-super-120b-a12b",
+       "nvidia/minimaxai/minimax-m2.7",
+       "nvidia/z-ai/glm-5.1",
++      "dummy/dummy",
++      "dummy/note",
+     ]);
+   });
+ 
+@@ -1431,6 +1489,8 @@ describe("promptDefaultModel", () => {
+       "__keep__",
+       "__manual__",
+       "openai/gpt-5.5",
++      "dummy/dummy",
++      "dummy/note",
+     ]);
+   });
+ 
+diff --git a/src/config/schema.help.agents.ts b/src/config/schema.help.agents.ts
+index d52e816916f1c33ec5a55339e0f37663e22313f3..9ed0e4f967b28ca54782cd1e83bc9b234aa7ae4d 100644
+--- a/src/config/schema.help.agents.ts
++++ b/src/config/schema.help.agents.ts
+@@ -212,6 +212,8 @@ export const AGENT_FIELD_HELP: Record<string, string> = {
+   mcp: "Global MCP server definitions managed by OpenClaw. Embedded OpenClaw and other runtime adapters can consume these servers without storing them inside runtime-owned project settings.",
+   "mcp.servers":
+     "Named MCP server definitions. OpenClaw stores them in its own config and runtime adapters decide which transports are supported at execution time.",
++  "mcp.servers.*.allowPrivateNetwork":
++    "Allow this HTTP MCP server to resolve or redirect to private, loopback, or link-local networks. Use only for trusted local MCP endpoints; disabled by default.",
+   "mcp.servers.*.codex":
+     "OpenClaw projection metadata for Codex app-server threads only. It does not affect ACP sessions or generic Codex harness config. Omit this block to keep the server available to every Codex app-server agent with Codex's default MCP approval behavior.",
+   "mcp.servers.*.toolFilter":
+diff --git a/src/config/schema.labels.ts b/src/config/schema.labels.ts
+index 140d1b12e565ceb593a572f6bb2b377575f12c58..b154a98a8e25a8d583e00e6dcb6dd84b77ca49a7 100644
+--- a/src/config/schema.labels.ts
++++ b/src/config/schema.labels.ts
+@@ -722,6 +722,7 @@ export const FIELD_LABELS: Record<string, string> = {
+   "mcp.servers.*.supportsParallelToolCalls": "MCP Parallel Tool Calls",
+   "mcp.servers.*.supports_parallel_tool_calls": "MCP Parallel Tool Calls",
+   "mcp.servers.*.sslVerify": "MCP TLS Verification",
++  "mcp.servers.*.allowPrivateNetwork": "MCP Allow Private Network",
+   "mcp.servers.*.ssl_verify": "MCP TLS Verification",
+   "mcp.servers.*.clientCert": "MCP Client Certificate",
+   "mcp.servers.*.client_cert": "MCP Client Certificate",
+diff --git a/src/config/schema.test.ts b/src/config/schema.test.ts
+index f2ddf65a284c88d4e701ec53018698636073b2fd..1e6f5913559d7acb8dc29a46217fbd8ae6004149 100644
+--- a/src/config/schema.test.ts
++++ b/src/config/schema.test.ts
+@@ -217,6 +217,7 @@ describe("config schema", () => {
+     expect(serversNode?.additionalProperties?.properties).toHaveProperty("auth");
+     expect(serversNode?.additionalProperties?.properties).toHaveProperty("oauth");
+     expect(serversNode?.additionalProperties?.properties).toHaveProperty("sslVerify");
++    expect(serversNode?.additionalProperties?.properties).toHaveProperty("allowPrivateNetwork");
+     expect(serversNode?.additionalProperties?.properties).toHaveProperty("clientCert");
+     expect(serversNode?.additionalProperties?.properties).toHaveProperty("toolFilter");
+     expect(serversNode?.additionalProperties?.properties).toHaveProperty("codex");
+diff --git a/src/config/types.mcp.ts b/src/config/types.mcp.ts
+index 676b754a277287eb2721fba948f41264c42afee3..42ddefc3525d71576c7c7f9bfe860bc861937674 100644
+--- a/src/config/types.mcp.ts
++++ b/src/config/types.mcp.ts
+@@ -36,6 +36,8 @@ export type McpServerConfig = {
+   transport?: "stdio" | "sse" | "streamable-http";
+   /** HTTP transport: extra HTTP headers sent with every request. */
+   headers?: Record<string, string | number | boolean>;
++  /** Allow this trusted HTTP MCP server, including redirects, to reach private networks. */
++  allowPrivateNetwork?: boolean;
+   /** Optional connection timeout in milliseconds. */
+   connectionTimeoutMs?: number;
+   /** Optional per-request timeout in milliseconds. */
+diff --git a/src/config/zod-schema.root-support.ts b/src/config/zod-schema.root-support.ts
+index 781b80fbbdf721abbab844c2336e432cffd5212c..59ec9c1d04d33de30381bd6279a859e710573788 100644
+--- a/src/config/zod-schema.root-support.ts
++++ b/src/config/zod-schema.root-support.ts
+@@ -290,6 +290,7 @@ const McpServerSchema = z
+         clientMetadataUrl: McpOAuthClientMetadataUrlSchema.optional(),
+       })
+       .optional(),
++    allowPrivateNetwork: z.boolean().optional(),
+     sslVerify: z.boolean().optional(),
+     clientCert: z.string().optional(),
+     clientKey: z.string().optional(),
+diff --git a/src/flows/model-picker.ts b/src/flows/model-picker.ts
+index 0c4fe85557b9caebae237facebba77a51d15a4e3..afca227a88a46131ff4cc7d8110dc632fc395622 100644
+--- a/src/flows/model-picker.ts
++++ b/src/flows/model-picker.ts
+@@ -3,6 +3,10 @@ import { normalizeOptionalString } from "@openclaw/normalization-core/string-coe
+ import { sortUniqueStrings } from "@openclaw/normalization-core/string-normalization";
+ import { resolveAgentConfig, resolveDefaultAgentDir } from "../agents/agent-scope.js";
+ import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "../agents/defaults.js";
++import {
++  DETERMINISTIC_GATEWAY_MODEL_REF,
++  DETERMINISTIC_NOTE_MODEL_REF,
++} from "../agents/deterministic-gateway-model.js";
+ import { resolveAgentHarnessPolicy } from "../agents/harness/policy.js";
+ import {
+   resolveLogicalModelCatalogEntryState,
+@@ -52,6 +56,16 @@ export { applyPrimaryModel } from "../plugins/provider-model-primary.js";
+ const KEEP_VALUE = "__keep__";
+ const MANUAL_VALUE = "__manual__";
+ const BROWSE_VALUE = "__browse__";
++function addDeterministicModelOptions(options: WizardSelectOption[]) {
++  for (const [value, label] of [
++    [DETERMINISTIC_GATEWAY_MODEL_REF, t("wizard.model.deterministicGateway")],
++    [DETERMINISTIC_NOTE_MODEL_REF, t("wizard.model.deterministicNote")],
++  ] as const) {
++    if (!options.some((option) => option.value === value)) {
++      options.push({ value, label });
++    }
++  }
++}
+ const PROVIDER_FILTER_THRESHOLD = 30;
+ const EMPTY_LITERAL_PREFIX_PROVIDERS = new Set<string>();
+ type ModelRouteRuntimeResolver = (params: {
+@@ -885,6 +899,7 @@ export async function promptDefaultModel(
+       label: t("wizard.model.browseAll"),
+       hint: t("wizard.model.loadsProviderCatalogs"),
+     });
++    addDeterministicModelOptions(options);
+ 
+     const selection = await params.prompter.select({
+       message: params.message ?? t("wizard.model.defaultModel"),
+@@ -930,17 +945,13 @@ export async function promptDefaultModel(
+         hint: t("wizard.model.current"),
+       });
+     }
+-    if (options.length === 0) {
+-      return promptManualModel({
+-        prompter: params.prompter,
+-        allowBlank: allowKeep,
+-        initialValue: configuredRaw || resolvedKey || undefined,
+-      });
+-    }
++    addDeterministicModelOptions(options);
+     const selection = await params.prompter.select({
+       message: params.message ?? t("wizard.model.defaultModel"),
+       options,
+-      initialValue: allowKeep ? KEEP_VALUE : configuredKey || MANUAL_VALUE,
++      initialValue: allowKeep
++        ? KEEP_VALUE
++        : configuredKey || (includeManual ? MANUAL_VALUE : DETERMINISTIC_GATEWAY_MODEL_REF),
+       searchable: false,
+     });
+     if (selection === KEEP_VALUE) {
+@@ -972,11 +983,7 @@ export async function promptDefaultModel(
+   }
+   const catalog = catalogSnapshot.entries;
+   if (catalog.length === 0) {
+-    return promptManualModel({
+-      prompter: params.prompter,
+-      allowBlank: allowKeep,
+-      initialValue: configuredRaw || resolvedKey || undefined,
+-    });
++    return promptDefaultModel({ ...params, loadCatalog: false });
+   }
+ 
+   const aliasIndex = buildModelAliasIndex({
+@@ -1004,11 +1011,7 @@ export async function promptDefaultModel(
+     hasAuth,
+   });
+   if (models.length === 0) {
+-    return promptManualModel({
+-      prompter: params.prompter,
+-      allowBlank: allowKeep,
+-      initialValue: configuredRaw || resolvedKey || undefined,
+-    });
++    return promptDefaultModel({ ...params, loadCatalog: false });
+   }
+ 
+   const isVisibleProvider = createModelPickerVisibleProviderPredicate({
+@@ -1026,11 +1029,7 @@ export async function promptDefaultModel(
+     isVisibleProvider,
+   });
+   if (filteredModels.length === 0) {
+-    return promptManualModel({
+-      prompter: params.prompter,
+-      allowBlank: allowKeep,
+-      initialValue: configuredRaw || resolvedKey || undefined,
+-    });
++    return promptDefaultModel({ ...params, loadCatalog: false });
+   }
+   const matchesPreferredProvider = preferredProvider
+     ? createPreferredProviderMatcher({
+@@ -1096,6 +1095,7 @@ export async function promptDefaultModel(
+     });
+   }
+ 
++  addDeterministicModelOptions(options);
+   const firstPreferredModel =
+     preferredProvider && hasPreferredProvider
+       ? filteredModels.find((entry) => matchesPreferredProvider?.(entry.provider))
+@@ -1133,6 +1133,12 @@ export async function promptDefaultModel(
+     });
+   }
+ 
++  if (
++    selectedValue === DETERMINISTIC_GATEWAY_MODEL_REF ||
++    selectedValue === DETERMINISTIC_NOTE_MODEL_REF
++  ) {
++    return { model: selectedValue };
++  }
+   const providerPluginResult = await maybeHandleProviderPluginSelection({
+     selection: selectedValue,
+     cfg,
+diff --git a/src/plugins/before-agent-reply.test.ts b/src/plugins/before-agent-reply.test.ts
+index 21e3921a35317a3be5540a980e58be86ef0c1257..8525cfa454fa77c14c836e07f505f6f32055991e 100644
+--- a/src/plugins/before-agent-reply.test.ts
++++ b/src/plugins/before-agent-reply.test.ts
+@@ -1,4 +1,5 @@
+ import { beforeEach, describe, expect, it, vi } from "vitest";
++import { DETERMINISTIC_GATEWAY_REPLY } from "../agents/deterministic-gateway-model.js";
+ import {
+   buildHandledBeforeAgentReplyPayloads,
+   runBeforeAgentReplyForTurn,
+@@ -8,10 +9,12 @@ import {
+ const hookRunner = vi.hoisted(() => ({
+   hasHooks: vi.fn(),
+   runBeforeAgentReply: vi.fn(),
++  plugins: [] as Array<{ id: string; status: string }>,
+ }));
+ 
+ vi.mock("./hook-runner-global.js", () => ({
+   getGlobalHookRunner: () => hookRunner,
++  getGlobalPluginRegistry: () => ({ plugins: hookRunner.plugins }),
+ }));
+ 
+ function runHook(runId: string) {
+@@ -27,6 +30,7 @@ describe("before_agent_reply runner boundary", () => {
+   beforeEach(() => {
+     hookRunner.hasHooks.mockReset().mockReturnValue(true);
+     hookRunner.runBeforeAgentReply.mockReset().mockResolvedValue(undefined);
++    hookRunner.plugins = [];
+   });
+ 
+   it("preserves the complete reply payload", () => {
+@@ -40,6 +44,103 @@ describe("before_agent_reply runner boundary", () => {
+     expect(buildHandledBeforeAgentReplyPayloads(reply)).toEqual([reply]);
+   });
+ 
++  it.each([true, false])(
++    "checkpoints the deterministic reply when hooks are present: %s",
++    async (hasHooks) => {
++      hookRunner.hasHooks.mockReturnValue(hasHooks);
++      const beforeDispatch = vi.fn(async () => undefined);
++      const afterDispatch = vi.fn(async (result) => result);
++      const result = await withBeforeAgentReplyObserver({ beforeDispatch, afterDispatch }, () =>
++        runBeforeAgentReplyForTurn({
++          runId: `dummy-${hasHooks}`,
++          trigger: "user",
++          event: { cleanedBody: "hi" },
++          context: { modelProviderId: "dummy", modelId: "dummy" },
++        }),
++      );
++      expect(result).toEqual({ handled: true, reply: { text: DETERMINISTIC_GATEWAY_REPLY } });
++      expect(beforeDispatch).toHaveBeenCalledOnce();
++      expect(afterDispatch).toHaveBeenCalledWith(result);
++      expect(hookRunner.runBeforeAgentReply).toHaveBeenCalledTimes(hasHooks ? 1 : 0);
++    },
++  );
++
++  it.each([true, false])("reports the NOTE installation state: %s", async (installed) => {
++    if (installed) hookRunner.plugins = [{ id: "note", status: "loaded" }];
++    const result = await runBeforeAgentReplyForTurn({
++      runId: `note-${installed}`,
++      trigger: "user",
++      event: { cleanedBody: "hi" },
++      context: { modelProviderId: "dummy", modelId: "note" },
++    });
++    expect(result).toEqual({
++      handled: true,
++      reply: {
++        text: installed
++          ? "NOTE ✅"
++          : "NOTE is not installed. Please install: https://github.com/safrano9999/NOTE/releases/latest/download/note-latest.zip",
++      },
++    });
++  });
++
++  it("preserves a NOTE hook claim and the original user media and location", async () => {
++    const reply = { text: "saved", channelData: { note: true } };
++    hookRunner.runBeforeAgentReply.mockResolvedValue({ handled: true, reply });
++    const structuredContext = [{ label: "location", payload: { custom: true } }];
++    const result = await withBeforeAgentReplyObserver(
++      {
++        inboundContext: {
++          commandText: "  save this\nplease ",
++          RawBody: "not command text",
++          media: [
++            { path: "" },
++            { path: "/tmp/photo.jpg", contentType: "image/jpeg", workspaceDir: "/tmp/media" },
++          ],
++          LocationLat: 12.3,
++          LocationLon: 45.6,
++          LocationAccuracy: 8,
++          LocationName: "Home",
++          LocationAddress: "Main Street",
++          LocationSource: "telegram",
++          LocationIsLive: true,
++          LocationCaption: "pin",
++          ChannelStructuredContext: structuredContext,
++        },
++        beforeDispatch: async () => undefined,
++        afterDispatch: async (value) => value,
++      },
++      () =>
++        runBeforeAgentReplyForTurn({
++          runId: "note-claimed-media",
++          trigger: "user",
++          event: { cleanedBody: "augmented prompt" },
++          context: { modelProviderId: "dummy", modelId: "note" },
++        }),
++    );
++    expect(result).toEqual({ handled: true, reply });
++    expect(hookRunner.runBeforeAgentReply).toHaveBeenCalledWith(
++      {
++        cleanedBody: "augmented prompt",
++        userText: "save this\nplease",
++        mediaPaths: ["/tmp/photo.jpg"],
++        mediaTypes: ["image/jpeg"],
++        mediaWorkspaceDir: "/tmp/media",
++        location: {
++          latitude: 12.3,
++          longitude: 45.6,
++          accuracy: 8,
++          name: "Home",
++          address: "Main Street",
++          source: "telegram",
++          isLive: true,
++          caption: "pin",
++        },
++        structuredContext,
++      },
++      { modelProviderId: "dummy", modelId: "note", trigger: "user" },
++    );
++  });
++
+   it.each([
+     { runId: "missing", context: { runId: "missing" } },
+     { runId: "mismatch", context: { runId: "mismatch", trigger: "heartbeat" } },
+diff --git a/src/plugins/before-agent-reply.ts b/src/plugins/before-agent-reply.ts
+index 623401bff6351f317ff078bb13bf81a09b0173cf..afcf3b68bed3285839e1093d3f7ee499d3ef8c17 100644
+--- a/src/plugins/before-agent-reply.ts
++++ b/src/plugins/before-agent-reply.ts
+@@ -1,9 +1,16 @@
+ import { AsyncLocalStorage } from "node:async_hooks";
++import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
++import {
++  DETERMINISTIC_GATEWAY_REPLY,
++  isDeterministicGatewayModel,
++  isDeterministicNoteModel,
++} from "../agents/deterministic-gateway-model.js";
+ import type { ReplyPayload } from "../auto-reply/reply-payload.js";
++import type { TemplateContext } from "../auto-reply/templating.js";
+ import { SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
+ import { runOncePerAgentRun } from "../infra/agent-events.js";
+ import { resolveGlobalSingleton } from "../shared/global-singleton.js";
+-import { getGlobalHookRunner } from "./hook-runner-global.js";
++import { getGlobalHookRunner, getGlobalPluginRegistry } from "./hook-runner-global.js";
+ import type {
+   PluginHookAgentContext,
+   PluginHookBeforeAgentReplyEvent,
+@@ -14,6 +21,7 @@ import { isPluginHookAgentTrigger } from "./hook-types.js";
+ const BEFORE_AGENT_REPLY_OBSERVER_KEY = Symbol.for("openclaw.beforeAgentReply.observer");
+ 
+ type BeforeAgentReplyObserver = {
++  inboundContext?: TemplateContext;
+   beforeDispatch: () => Promise<boolean | void>;
+   afterDispatch: (
+     result: PluginHookBeforeAgentReplyResult | undefined,
+@@ -55,7 +63,12 @@ export function runBeforeAgentReplyForTurn(params: {
+   const context = { ...params.context, trigger };
+   return runOncePerAgentRun(params.runId, "before_agent_reply", async () => {
+     const hookRunner = getGlobalHookRunner();
+-    if (!hookRunner?.hasHooks("before_agent_reply", context)) {
++    const hasHooks = hookRunner?.hasHooks("before_agent_reply", context);
++    const deterministic = isDeterministicGatewayModel(
++      context.modelProviderId ?? "",
++      context.modelId ?? "",
++    );
++    if (!hasHooks && !deterministic) {
+       return undefined;
+     }
+     const observerScope = beforeAgentReplyObserver.getStore();
+@@ -72,7 +85,58 @@ export function runBeforeAgentReplyForTurn(params: {
+       return undefined;
+     }
+     params.onDispatch?.();
+-    let result = await hookRunner.runBeforeAgentReply(params.event, context);
++    const inbound = observer?.inboundContext;
++    const userText =
++      normalizeOptionalString(inbound?.commandText) ??
++      normalizeOptionalString(inbound?.CommandBody) ??
++      normalizeOptionalString(inbound?.RawBody) ??
++      normalizeOptionalString(inbound?.BodyForCommands);
++    const mediaPaths = inbound?.media
++      ?.map((entry) => entry.path)
++      .filter((value): value is string => typeof value === "string" && Boolean(value.trim()));
++    const mediaTypes = inbound?.media
++      ?.map((entry) => entry.contentType ?? entry.kind)
++      .filter((value): value is string => typeof value === "string" && Boolean(value.trim()));
++    const mediaWorkspaceDir = inbound?.media?.find((entry) => entry.workspaceDir)?.workspaceDir;
++    const structuredContext =
++      inbound?.ChannelStructuredContext ?? inbound?.UntrustedStructuredContext;
++    const event: PluginHookBeforeAgentReplyEvent = {
++      ...params.event,
++      ...(userText ? { userText } : {}),
++      ...(inbound
++        ? {
++            ...(mediaPaths?.length ? { mediaPaths } : {}),
++            ...(mediaTypes?.length ? { mediaTypes } : {}),
++            ...(mediaWorkspaceDir ? { mediaWorkspaceDir } : {}),
++            ...(typeof inbound.LocationLat === "number" && typeof inbound.LocationLon === "number"
++              ? {
++                  location: {
++                    latitude: inbound.LocationLat,
++                    longitude: inbound.LocationLon,
++                    accuracy: inbound.LocationAccuracy,
++                    name: inbound.LocationName,
++                    address: inbound.LocationAddress,
++                    source: inbound.LocationSource,
++                    isLive: inbound.LocationIsLive,
++                    caption: inbound.LocationCaption,
++                  },
++                }
++              : {}),
++            ...(structuredContext?.length ? { structuredContext } : {}),
++          }
++        : {}),
++    };
++    let result = hasHooks ? await hookRunner!.runBeforeAgentReply(event, context) : undefined;
++    if (!result?.handled && deterministic) {
++      const text = isDeterministicNoteModel(context.modelProviderId ?? "", context.modelId ?? "")
++        ? getGlobalPluginRegistry()?.plugins.some(
++            (plugin) => plugin.id === "note" && plugin.status === "loaded",
++          )
++          ? "NOTE ✅"
++          : "NOTE is not installed. Please install: https://github.com/safrano9999/NOTE/releases/latest/download/note-latest.zip"
++        : DETERMINISTIC_GATEWAY_REPLY;
++      result = { handled: true, reply: { text } };
++    }
+     if (!result?.handled) {
+       params.onDeclined?.();
+     }
+diff --git a/src/plugins/hook-types.ts b/src/plugins/hook-types.ts
+index 14ed24fd731cbea00ba183ce6a95e7f3fe000539..426fd70cc2c93d6b78faf6b755324b874a140191 100644
+--- a/src/plugins/hook-types.ts
++++ b/src/plugins/hook-types.ts
+@@ -344,6 +344,21 @@ export type PluginHookContextWindowSource =
+ 
+ export type PluginHookBeforeAgentReplyEvent = {
+   cleanedBody: string;
++  userText?: string;
++  mediaPaths?: string[];
++  mediaTypes?: string[];
++  mediaWorkspaceDir?: string;
++  location?: {
++    latitude: number;
++    longitude: number;
++    accuracy?: number;
++    name?: string;
++    address?: string;
++    source?: string;
++    isLive?: boolean;
++    caption?: string;
++  };
++  structuredContext?: Array<{ label: string; source?: string; type?: string; payload: unknown }>;
+ };
+ 
+ export type PluginHookBeforeAgentReplyResult = {
+diff --git a/src/wizard/i18n/locales/en.ts b/src/wizard/i18n/locales/en.ts
+index 73943813a57e37becc6567b50079c2eae28b49a8..0cc01198ee2197a1c508e09ae88f689d12f6c65b 100644
+--- a/src/wizard/i18n/locales/en.ts
++++ b/src/wizard/i18n/locales/en.ts
+@@ -238,6 +238,8 @@ export const en = {
+       defaultModelBlankToKeep: "Default model (blank to keep)",
+       defaultSet: "Default model set to {model}",
+       defaultSetForAgent: 'Default model set to {model} for agent "{agent}".',
++      deterministicGateway: "dummy/dummy - No AI - deterministic gateway only",
++      deterministicNote: "dummy/note - deterministic NOTE model",
+       enterManually: "Enter model manually",
+       filterByProvider: "Filter models by provider",
+       keepCurrent: "Keep current ({value})",
+diff --git a/src/wizard/i18n/locales/zh-CN.ts b/src/wizard/i18n/locales/zh-CN.ts
+index d5284acb9cd2b20996c4efe22e89639366762cb7..c216fb500c0bdd114c75276e06e2555fdcfc0945 100644
+--- a/src/wizard/i18n/locales/zh-CN.ts
++++ b/src/wizard/i18n/locales/zh-CN.ts
+@@ -236,6 +236,8 @@ export const zh_CN = {
+       defaultModelBlankToKeep: "默认模型（留空则保留）",
+       defaultSet: "默认模型已设置为 {model}",
+       defaultSetForAgent: 'agent "{agent}" 的默认模型已设置为 {model}。',
++      deterministicGateway: "dummy/dummy - 无 AI - 仅确定性 Gateway",
++      deterministicNote: "dummy/note - deterministic NOTE model",
+       enterManually: "手动输入模型",
+       filterByProvider: "按 provider 筛选模型",
+       keepCurrent: "保留当前值（{value}）",
+diff --git a/src/wizard/i18n/locales/zh-TW.ts b/src/wizard/i18n/locales/zh-TW.ts
+index 8e2e3713cee09c2dcd351006905a7d3005c65df3..1b3b6262bf856adae998ea2fc9098851325549f1 100644
+--- a/src/wizard/i18n/locales/zh-TW.ts
++++ b/src/wizard/i18n/locales/zh-TW.ts
+@@ -236,6 +236,8 @@ export const zh_TW = {
+       defaultModelBlankToKeep: "預設模型（留空則保留）",
+       defaultSet: "預設模型已設定為 {model}",
+       defaultSetForAgent: 'agent "{agent}" 的預設模型已設定為 {model}。',
++      deterministicGateway: "dummy/dummy - 無 AI - 僅確定性 Gateway",
++      deterministicNote: "dummy/note - deterministic NOTE model",
+       enterManually: "手動輸入模型",
+       filterByProvider: "按 provider 篩選模型",
+       keepCurrent: "保留目前值（{value}）",
+diff --git a/test/scripts/runtime-postbuild.test.ts b/test/scripts/runtime-postbuild.test.ts
+index ee4ef93988800cf770b0172d35edcbdf895f9c01..ad33f0366d14fe29e77355de8e126050331fd9c0 100644
+--- a/test/scripts/runtime-postbuild.test.ts
++++ b/test/scripts/runtime-postbuild.test.ts
+@@ -38,6 +38,7 @@ async function expectPathMissing(targetPath: string): Promise<void> {
+ }
+ 
+ async function writeExportHtmlBuildFixture(rootDir: string): Promise<void> {
++  await writeDeterministicReplyFixture(rootDir);
+   const sourceDir = path.join(rootDir, "src", "auto-reply", "reply", "export-html");
+   await fs.mkdir(sourceDir, { recursive: true });
+   await fs.writeFile(path.join(sourceDir, "template.html"), "<html></html>\n", "utf8");
+@@ -69,9 +70,18 @@ async function writeExportHtmlBuildFixture(rootDir: string): Promise<void> {
+   }
+ }
+ 
++async function writeDeterministicReplyFixture(rootDir: string): Promise<void> {
++  await fs.mkdir(path.join(rootDir, "src", "agents"), { recursive: true });
++  await fs.writeFile(
++    path.join(rootDir, "src", "agents", "deterministic-gateway-replies.txt"),
++    "custom deterministic reply\n",
++  );
++}
++
+ describe("runtime postbuild static assets", () => {
+   it("copies bundled hook metadata without replacing compiled handlers", async () => {
+     const rootDir = createTempDir("openclaw-runtime-postbuild-hooks-");
++    await writeDeterministicReplyFixture(rootDir);
+     const sourceHookDir = path.join(rootDir, "src", "hooks", "bundled", "session-memory");
+     const distHookDir = path.join(rootDir, "dist", "bundled", "session-memory");
+     await fs.mkdir(sourceHookDir, { recursive: true });
+@@ -252,6 +262,7 @@ describe("runtime postbuild static assets", () => {
+ 
+   it("stages copied static assets byte-for-byte during the same postbuild run", async () => {
+     const rootDir = createTempDir("openclaw-runtime-postbuild-");
++    await writeDeterministicReplyFixture(rootDir);
+     const source = "extensions/diffs/assets/viewer-runtime.js";
+     const output = "assets/viewer-runtime.js";
+     const distAsset = "dist/extensions/diffs/assets/viewer-runtime.js";
+@@ -337,6 +348,9 @@ describe("runtime postbuild static assets", () => {
+         "selected root only\n",
+       );
+       await expectPathMissing(moduleSentinelPath);
++      await expect(
++        fs.readFile(path.join(rootDir, "dist", "deterministic-gateway-replies.txt"), "utf8"),
++      ).resolves.toBe("custom deterministic reply\n");
+     } finally {
+       await fs.rm(moduleSentinelPath, { force: true });
+     }
+@@ -393,6 +407,7 @@ describe("runtime postbuild static assets", () => {
+ 
+   it("preserves restored dist static assets when plugin sources are absent", async () => {
+     const rootDir = createTempDir("openclaw-runtime-postbuild-");
++    await writeDeterministicReplyFixture(rootDir);
+     const output = "assets/viewer-runtime.js";
+     const distPluginDir = path.join(rootDir, "dist", "extensions", "diffs");
+     const runtimeAsset = path.join(rootDir, "dist-runtime", "extensions", "diffs", output);
+@@ -431,6 +446,7 @@ describe("runtime postbuild static assets", () => {
+ 
+   it("can skip static asset copies for minimal runtime builds", async () => {
+     const rootDir = createTempDir("openclaw-runtime-postbuild-");
++    await writeDeterministicReplyFixture(rootDir);
+     const warn = vi.fn();
+     const output = "assets/viewer-runtime.js";
+ 
+diff --git a/src/agents/deterministic-gateway-model.test.ts b/src/agents/deterministic-gateway-model.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a7c02965570f4ce020ed01ffd5ffa55638e57121
+--- /dev/null
++++ b/src/agents/deterministic-gateway-model.test.ts
+@@ -0,0 +1,22 @@
++import { describe, expect, it } from "vitest";
++import {
++  DETERMINISTIC_GATEWAY_REPLY,
++  isDeterministicGatewayModel,
++  isDeterministicNoteModel,
++} from "./deterministic-gateway-model.js";
++
++describe("deterministic gateway models", () => {
++  it("accepts dummy/dummy and dummy/note", () => {
++    expect(isDeterministicGatewayModel("dummy", "dummy")).toBe(true);
++    expect(isDeterministicGatewayModel("dummy", "note")).toBe(true);
++    expect(isDeterministicGatewayModel("dummy", "other")).toBe(false);
++  });
++
++  it("loads the dummy response and identifies the NOTE model", () => {
++    expect(DETERMINISTIC_GATEWAY_REPLY).toBe(
++      "Not a valid command. Use /tools to see available commands.",
++    );
++    expect(isDeterministicNoteModel("dummy", "note")).toBe(true);
++    expect(isDeterministicNoteModel("dummy", "dummy")).toBe(false);
++  });
++});
+diff --git a/src/agents/deterministic-gateway-model.ts b/src/agents/deterministic-gateway-model.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..8ce4c5c8c3175d9e1e314a604353a335bc5cc5fa
+--- /dev/null
++++ b/src/agents/deterministic-gateway-model.ts
+@@ -0,0 +1,26 @@
++import fs from "node:fs";
++import { fileURLToPath } from "node:url";
++
++const repliesPath = fileURLToPath(new URL("./deterministic-gateway-replies.txt", import.meta.url));
++const gatewayReply = fs.readFileSync(repliesPath, "utf8").trim();
++if (!gatewayReply) throw new Error(`Invalid deterministic replies file: ${repliesPath}`);
++
++export const DETERMINISTIC_GATEWAY_PROVIDER = "dummy";
++export const DETERMINISTIC_GATEWAY_MODEL = "dummy";
++export const DETERMINISTIC_GATEWAY_MODEL_REF = `${DETERMINISTIC_GATEWAY_PROVIDER}/${DETERMINISTIC_GATEWAY_MODEL}`;
++export const DETERMINISTIC_NOTE_MODEL = "note";
++export const DETERMINISTIC_NOTE_MODEL_REF = `${DETERMINISTIC_GATEWAY_PROVIDER}/${DETERMINISTIC_NOTE_MODEL}`;
++export const DETERMINISTIC_GATEWAY_REPLY = gatewayReply;
++export function isDeterministicGatewayModel(provider: string, model: string): boolean {
++  return (
++    provider.trim().toLowerCase() === DETERMINISTIC_GATEWAY_PROVIDER &&
++    [DETERMINISTIC_GATEWAY_MODEL, DETERMINISTIC_NOTE_MODEL].includes(model.trim().toLowerCase())
++  );
++}
++
++export function isDeterministicNoteModel(provider: string, model: string): boolean {
++  return (
++    provider.trim().toLowerCase() === DETERMINISTIC_GATEWAY_PROVIDER &&
++    model.trim().toLowerCase() === DETERMINISTIC_NOTE_MODEL
++  );
++}
+diff --git a/src/agents/deterministic-gateway-replies.txt b/src/agents/deterministic-gateway-replies.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..75bfe8c68f5063ea0c1dc3edba540aa9ccbfca73
+--- /dev/null
++++ b/src/agents/deterministic-gateway-replies.txt
+@@ -0,0 +1 @@
++Not a valid command. Use /tools to see available commands.
+diff --git a/src/auto-reply/reply/directive-handling.defaults.test.ts b/src/auto-reply/reply/directive-handling.defaults.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..49bf6166b12f95a3f78010da8e919352e66f35b3
+--- /dev/null
++++ b/src/auto-reply/reply/directive-handling.defaults.test.ts
+@@ -0,0 +1,20 @@
++import { describe, expect, it } from "vitest";
++import type { OpenClawConfig } from "../../config/types.openclaw.js";
++import { resolveDefaultModel } from "./directive-handling.defaults.js";
++
++describe("resolveDefaultModel", () => {
++  it("accepts deterministic gateway mode from openclaw.json", () => {
++    const config = {
++      agents: {
++        defaults: {
++          model: { primary: "dummy/dummy" },
++        },
++      },
++    } satisfies OpenClawConfig;
++
++    expect(resolveDefaultModel({ cfg: config })).toMatchObject({
++      defaultProvider: "dummy",
++      defaultModel: "dummy",
++    });
++  });
++});

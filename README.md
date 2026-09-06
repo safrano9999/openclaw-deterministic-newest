@@ -1,11 +1,12 @@
-# OpenClaw Deterministic
+# OpenClaw Deterministic Newest
 
-[![Pinned version](https://img.shields.io/badge/OpenClaw-2026.7.1-111827)](#version-pin)
-[![Patch](https://img.shields.io/badge/patch-dummy%2Fdummy%20%7C%20dummy%2Fnote-2563eb)](patches/openclaw-2026.7.1-deterministic.patch)
-[![Image](https://img.shields.io/badge/image-openclaw--ephemeral-0ea5e9)](https://github.com/users/safrano9999/packages/container/package/openclaw-ephemeral)
+[![Pinned version](https://img.shields.io/badge/OpenClaw-2026.9.2-111827)](#version-pin)
+[![Patch](https://img.shields.io/badge/patch-dummy%2Fdummy%20%7C%20dummy%2Fnote-2563eb)](patches/openclaw-2026.9.2-deterministic.patch)
+[![Image](https://img.shields.io/badge/image-openclaw--ephemeral--newest-0ea5e9)](https://github.com/users/safrano9999/packages/container/package/openclaw-ephemeral-newest)
 
 The independently maintained, exact deterministic gateway patch used by the
-Safrano OpenClaw image.
+Safrano OpenClaw newest image line. This repository is separate from the original
+version-pinned distribution.
 
 This is a standalone public repository owned by `safrano9999`. It is not a
 GitHub fork and has no pull-request relationship to another repository.
@@ -15,17 +16,38 @@ GitHub fork and has no pull-request relationship to another repository.
 The canonical patch is:
 
 ```text
-patches/openclaw-2026.7.1-deterministic.patch
+patches/openclaw-2026.9.2-deterministic.patch
 ```
 
 SHA-256:
 
 ```text
-d9b266c4867b29a51b081519f1ec1a5aff59751c64d6b80108b42f104088d415
+379ea2641d7605045dc70f11ad1a3865881abc79ab1c7950bd060971f0bbdc91
 ```
 
-It contains the functional 26-file deterministic and per-server MCP private-network
+It contains the functional 32-file deterministic and per-server MCP private-network
 change set without unrelated repository history or automation.
+
+## Migration evidence
+
+The [previous 2026.7.1 patch](patches/openclaw-2026.7.1-deterministic.patch)
+is retained for comparison. The current port follows upstream's new owners:
+
+| Contract | 2026.7.1 patch | 2026.9.2 port / upstream equivalent |
+|---|---|---|
+| Fixed reply and NOTE precedence | Early fallback in `get-reply.ts` | Admitted-run `before-agent-reply.ts` owner; handled replies retain durable recovery bookkeeping. Deterministic turns skip model-backed maintenance. |
+| Hook model identity | Added provider/model context fields | Upstream already supplies `modelProviderId` and `modelId`; no duplicate patch. |
+| Hook user/media context | Legacy `MediaPaths` and related fields | Canonical `media[]`, location, and structured context project into the existing hook payload fields. |
+| Catalog, picker, and auth | Added both dummy models and bypassed model auth | Both models remain available through manifest/prepared catalogs and picker paths, without changing native route variants or account-entitlement filtering. |
+| Editable reply asset | `runtime-postbuild.mjs` copied the text file | The `.mts` postbuild owner and compiled test workers copy the same text asset. |
+| MCP private networking | Per-server explicit opt-in | Current transport and `zod-schema.root-support.ts` retain the opt-in; default SSRF protection and upstream OAuth/timeout handling remain intact. |
+
+Source validation passed exact-base patch checks, core TypeScript checking, focused
+regression suites, and the embedded-runner integration suite. Existing route,
+auth, and capability assertions remain in place; exact inventory expectations add
+the two deterministic choices. A fresh independent P0 review was scoped-clean.
+These source checks do not substitute for a successful GitHub artifact build or
+live LiteLLM/native ChatGPT model-discovery and request verification.
 
 ## Deterministic routes
 
@@ -70,8 +92,8 @@ immediately. Commands and plugin hooks remain ahead of the fallback.
 Click either screenshot to open its MP4 recording.
 
 These recordings predate the `2026.7.1` port. They demonstrate routing behavior,
-not byte-exact release wording; the canonical behavior is the version-pinned
-patch in this repository.
+not byte-exact release wording or `2026.9.2` build/runtime verification; the
+canonical behavior is the version-pinned patch in this repository.
 
 ### NOTE full mode
 
@@ -82,20 +104,28 @@ through `/note show`.
 ![NOTE full mode in Telegram](https://raw.githubusercontent.com/safrano9999/NOTE/2026.7.36/docs/full-mode.jpg)
 
 The NOTE screenshot is a workflow illustration captured on OpenClaw `2026.6.11`,
-not a `2026.7.1` build-verification artifact.
+not a `2026.9.2` build-verification artifact.
 
 ## Version pin
 
-The patch applies only to OpenClaw `2026.7.1`.
-The complete machine-readable build input is recorded in `build.conf`.
-Its corresponding runtime image is `ghcr.io/openclaw/openclaw:2026.7.1`.
+The patch applies only to OpenClaw `2026.9.2`, upstream commit
+`3928bad9badfcb6c7d140530435e806fb8092190`.
+The complete machine-readable build input is recorded in [build.conf](build.conf).
+Its corresponding upstream runtime image is `ghcr.io/openclaw/openclaw:2026.9.2`.
+The artifact build uses Node `24.18.0` and pnpm `12.1.0`.
 
 ```bash
-git apply patches/openclaw-2026.7.1-deterministic.patch
+git apply patches/openclaw-2026.9.2-deterministic.patch
 ```
 
 There is no automatic forward-port or compatibility layer. A newer OpenClaw
 version requires an explicit new patch and release.
+
+The pinned release target is
+[`2026.9.2-deterministic.2`](https://github.com/safrano9999/openclaw-deterministic-newest/releases/tag/2026.9.2-deterministic.2),
+with asset `openclaw-2026.9.2-deterministic.tar.gz` and its SHA-256 sidecar.
+The workflow uploads verification artifacts before optional release publication;
+manual dispatch defaults to `publish=false`.
 
 ## Public package
 
@@ -103,14 +133,14 @@ The distribution is intentionally split into three public repositories:
 
 | Repository | Responsibility |
 |---|---|
-| [openclaw-deterministic](https://github.com/safrano9999/openclaw-deterministic) | This exact version-pinned patch |
+| [openclaw-deterministic-newest](https://github.com/safrano9999/openclaw-deterministic-newest) | This exact version-pinned patch |
 | [NOTE](https://github.com/safrano9999/NOTE) | Independent storage plugin for `dummy/note` |
-| [openclaw-ephemeral](https://github.com/safrano9999/openclaw-ephemeral) | Python startup configuration and image build |
+| [openclaw-ephemeral-newest](https://github.com/safrano9999/openclaw-ephemeral-newest) | Python startup configuration and image build |
 
-The ready-to-run public image is:
+The public image publication target is:
 
 ```text
-ghcr.io/safrano9999/openclaw-ephemeral
+ghcr.io/safrano9999/openclaw-ephemeral-newest
 ```
 
 ## License
