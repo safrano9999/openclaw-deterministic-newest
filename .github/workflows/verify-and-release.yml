@@ -117,6 +117,9 @@ jobs:
             src/config/schema.test.ts \
             test/scripts/runtime-postbuild.test.ts \
             src/commands/auth-choice.model-check.test.ts \
+            src/commands/models/list.rows.activation.test.ts \
+            src/plugins/providers.runtime.activation.test.ts \
+            src/config/plugin-auto-enable.core.test.ts \
             src/commands/model-picker.test.ts --maxWorkers=4
 
       - name: Build OpenClaw

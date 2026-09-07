@@ -22,11 +22,11 @@ patches/openclaw-2026.9.2-deterministic.patch
 SHA-256:
 
 ```text
-379ea2641d7605045dc70f11ad1a3865881abc79ab1c7950bd060971f0bbdc91
+1a1ce6ba2c68100baa82dded78c296f71a333ebde9eeb80be760fd8807275b69
 ```
 
-It contains the functional 32-file deterministic and per-server MCP private-network
-change set without unrelated repository history or automation.
+It contains the 37-file deterministic, per-server MCP private-network and provider
+activation performance change set without unrelated repository history or automation.
 
 ## Migration evidence
 
@@ -40,6 +40,7 @@ is retained for comparison. The current port follows upstream's new owners:
 | Hook user/media context | Legacy `MediaPaths` and related fields | Canonical `media[]`, location, and structured context project into the existing hook payload fields. |
 | Catalog, picker, and auth | Added both dummy models and bypassed model auth | Both models remain available through manifest/prepared catalogs and picker paths, without changing native route variants or account-entitlement filtering. |
 | Editable reply asset | `runtime-postbuild.mjs` copied the text file | The `.mts` postbuild owner and compiled test workers copy the same text asset. |
+| Model-list activation cost | Per-row plugin activation | Reuse the existing operation-owned activation and same-turn auto-enable cache, including persisted manifest metadata; preserve aliases, provider normalization, freshness and lifecycle invalidation. |
 | MCP private networking | Per-server explicit opt-in | Current transport and `zod-schema.root-support.ts` retain the opt-in; default SSRF protection and upstream OAuth/timeout handling remain intact. |
 
 Source validation passed exact-base patch checks, core TypeScript checking, focused
@@ -122,7 +123,7 @@ There is no automatic forward-port or compatibility layer. A newer OpenClaw
 version requires an explicit new patch and release.
 
 The pinned release target is
-[`2026.9.2-deterministic.2`](https://github.com/safrano9999/openclaw-deterministic-newest/releases/tag/2026.9.2-deterministic.2),
+[`2026.9.2-deterministic.3`](https://github.com/safrano9999/openclaw-deterministic-newest/releases/tag/2026.9.2-deterministic.3),
 with asset `openclaw-2026.9.2-deterministic.tar.gz` and its SHA-256 sidecar.
 The workflow uploads verification artifacts before optional release publication;
 manual dispatch defaults to `publish=false`.
