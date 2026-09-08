@@ -262,7 +262,7 @@ index 59c9792e..e3b2b024 100644
      clientCert: resolved.clientCert,
      clientKey: resolved.clientKey,
 diff --git a/src/agents/model-catalog.test.ts b/src/agents/model-catalog.test.ts
-index c5e2c1a4..69048600 100644
+index c5e2c1a4..9339ba91 100644
 --- a/src/agents/model-catalog.test.ts
 +++ b/src/agents/model-catalog.test.ts
 @@ -87,6 +87,19 @@ async function build(params: {
@@ -285,7 +285,23 @@ index c5e2c1a4..69048600 100644
    beforeEach(() => {
      mocks.augmentModelCatalogWithProviderPlugins.mockReset();
      mocks.augmentModelCatalogWithProviderPlugins.mockResolvedValue([]);
-@@ -134,6 +147,8 @@ describe("prepared model catalog builder", () => {
+@@ -110,8 +123,13 @@ describe("prepared model catalog builder", () => {
+         providerOutcomes: [{ provider: "demo", status }],
+         readOnly: false,
+       });
+-      expect(snapshot.entries).toMatchObject(entries);
+-      expect(snapshot.routeVariants).toMatchObject(entries);
++      const expected = [
++        ...entries,
++        { provider: "dummy", id: "dummy", name: "Deterministic gateway" },
++        { provider: "dummy", id: "note", name: "Deterministic NOTE" },
++      ];
++      expect(snapshot.entries).toMatchObject(expected);
++      expect(snapshot.routeVariants).toMatchObject(expected);
+       expect(snapshot.authoritative).toBe(status === "ready");
+     },
+   );
+@@ -134,6 +152,8 @@ describe("prepared model catalog builder", () => {
      expect(snapshot.entries.map((entry) => `${entry.provider}/${entry.id}`)).toEqual([
        "alpha/a",
        "beta/z",
@@ -294,7 +310,33 @@ index c5e2c1a4..69048600 100644
      ]);
      expect(snapshot.entries[0]?.thinkingLevelMap).toEqual({ off: null, max: "max" });
      expect(snapshot.routeVariants).toEqual(snapshot.entries);
-@@ -183,7 +198,12 @@ describe("prepared model catalog builder", () => {
+@@ -153,7 +173,11 @@ describe("prepared model catalog builder", () => {
+         { provider: "demo", profileId: "demo:second", status: "ready" },
+       ],
+     });
+-    expect(snapshot.entries).toMatchObject([healthy]);
++    expect(snapshot.entries).toMatchObject([
++      healthy,
++      { provider: "dummy", id: "dummy", name: "Deterministic gateway" },
++      { provider: "dummy", id: "note", name: "Deterministic NOTE" },
++    ]);
+     expect(snapshot.authoritative).toBe(false);
+   });
+ 
+@@ -171,7 +195,11 @@ describe("prepared model catalog builder", () => {
+         metadataSnapshot: createPluginMetadataSnapshotFixture({ plugins: [plugin] }),
+         entries: [{ provider: "source", id: "model", name: "Model" }],
+       });
+-      expect(snapshot.entries).toMatchObject([{ provider: "source", id: "model" }]);
++      expect(snapshot.entries).toMatchObject([
++        { provider: "dummy", id: "dummy", name: "Deterministic gateway" },
++        { provider: "dummy", id: "note", name: "Deterministic NOTE" },
++        { provider: "source", id: "model" },
++      ]);
+     },
+   );
+ 
+@@ -183,7 +211,12 @@ describe("prepared model catalog builder", () => {
        ],
      });
  
@@ -308,7 +350,7 @@ index c5e2c1a4..69048600 100644
      expect(snapshot.entries.every((entry) => entry.providerOrder === undefined)).toBe(true);
    });
  
-@@ -199,12 +219,20 @@ describe("prepared model catalog builder", () => {
+@@ -199,12 +232,20 @@ describe("prepared model catalog builder", () => {
        config,
        metadataSnapshot: runtimeManifest,
      });
@@ -332,7 +374,7 @@ index c5e2c1a4..69048600 100644
      expect(loadManifestModelCatalog({ config, metadataSnapshot: runtimeManifest })).toBe(
        declaredManifestModels,
      );
-@@ -317,9 +345,13 @@ describe("prepared model catalog builder", () => {
+@@ -317,9 +358,13 @@ describe("prepared model catalog builder", () => {
      });
  
      expect(snapshot.entries.map((entry) => `${entry.provider}/${entry.id}`)).toEqual([
@@ -346,7 +388,7 @@ index c5e2c1a4..69048600 100644
        "openai/gpt-5.5",
      ]);
    });
-@@ -341,6 +373,8 @@ describe("prepared model catalog builder", () => {
+@@ -341,6 +386,8 @@ describe("prepared model catalog builder", () => {
      });
  
      expect(snapshot.entries.map((entry) => entry.id)).toEqual([
@@ -355,7 +397,7 @@ index c5e2c1a4..69048600 100644
        "gpt-5.6-sol",
        "gpt-5.6-terra",
        "gpt-5.6-luna",
-@@ -363,6 +397,8 @@ describe("prepared model catalog builder", () => {
+@@ -363,6 +410,8 @@ describe("prepared model catalog builder", () => {
      });
  
      expect(snapshot.entries.map((entry) => `${entry.provider}/${entry.id}`)).toEqual([
@@ -364,7 +406,16 @@ index c5e2c1a4..69048600 100644
        "moonshot/kimi-k3",
        "moonshot/kimi-k2.7-code",
      ]);
-@@ -408,10 +444,14 @@ describe("prepared model catalog builder", () => {
+@@ -387,6 +436,8 @@ describe("prepared model catalog builder", () => {
+       { id: "Reader", providerOrder: 0 },
+       { id: "anchor", providerOrder: 1 },
+       { id: "reader", providerOrder: undefined },
++      { id: "dummy", providerOrder: undefined },
++      { id: "note", providerOrder: undefined },
+     ]);
+   });
+ 
+@@ -408,10 +459,14 @@ describe("prepared model catalog builder", () => {
  
      expect(mocks.augmentModelCatalogWithProviderPlugins).toHaveBeenCalledOnce();
      expect(snapshot.entries.map((entry) => `${entry.provider}/${entry.id}`)).toEqual([
@@ -380,7 +431,7 @@ index c5e2c1a4..69048600 100644
        "openai/gpt-5.5",
      ]);
    });
-@@ -440,6 +480,8 @@ describe("prepared model catalog builder", () => {
+@@ -440,6 +495,8 @@ describe("prepared model catalog builder", () => {
      });
  
      expect(snapshot.entries.map((entry) => entry.id)).toEqual([
@@ -389,7 +440,7 @@ index c5e2c1a4..69048600 100644
        "gpt-5.6-sol",
        "gpt-5.6-terra",
        "gpt-5.6-luna",
-@@ -485,7 +527,12 @@ describe("prepared model catalog builder", () => {
+@@ -485,7 +542,12 @@ describe("prepared model catalog builder", () => {
        readOnly: false,
      });
  
@@ -403,7 +454,7 @@ index c5e2c1a4..69048600 100644
    });
  
    it("preserves explicitly configured runtime-provider models", async () => {
-@@ -534,6 +581,8 @@ describe("prepared model catalog builder", () => {
+@@ -534,6 +596,8 @@ describe("prepared model catalog builder", () => {
      });
  
      expect(snapshot.entries.map((entry) => `${entry.provider}/${entry.id}`)).toEqual([
@@ -412,7 +463,7 @@ index c5e2c1a4..69048600 100644
        "openai/gpt-5.5",
        "openai/gpt-5.4",
      ]);
-@@ -569,6 +618,8 @@ describe("prepared model catalog builder", () => {
+@@ -569,6 +633,8 @@ describe("prepared model catalog builder", () => {
        });
  
        expect(snapshot.entries).toMatchObject([
@@ -421,7 +472,7 @@ index c5e2c1a4..69048600 100644
          { provider: "manifest-provider", id: "manifest-model" },
        ]);
      },
-@@ -589,6 +640,8 @@ describe("prepared model catalog builder", () => {
+@@ -589,6 +655,8 @@ describe("prepared model catalog builder", () => {
      });
  
      expect(snapshot.entries.map((entry) => `${entry.provider}/${entry.id}`)).toEqual([
@@ -430,7 +481,7 @@ index c5e2c1a4..69048600 100644
        "manifest-provider/manifest-model",
        "manifest-provider/synthetic-model",
      ]);
-@@ -635,7 +688,7 @@ describe("prepared model catalog builder", () => {
+@@ -635,7 +703,7 @@ describe("prepared model catalog builder", () => {
            : [],
        });
  
@@ -439,7 +490,7 @@ index c5e2c1a4..69048600 100644
        for (const model of models) {
          const expected = {
            id: model.id,
-@@ -656,7 +709,7 @@ describe("prepared model catalog builder", () => {
+@@ -656,7 +724,7 @@ describe("prepared model catalog builder", () => {
            expect.arrayContaining([expect.objectContaining({ ...expected, name: model.name })]),
          );
        }
@@ -448,7 +499,7 @@ index c5e2c1a4..69048600 100644
      },
    );
  
-@@ -775,7 +828,7 @@ describe("prepared model catalog builder", () => {
+@@ -775,7 +843,7 @@ describe("prepared model catalog builder", () => {
        },
      });
  
@@ -457,7 +508,7 @@ index c5e2c1a4..69048600 100644
    });
  
    it("rejects the whole generation when catalog projection fails after a valid row", async () => {
-@@ -819,6 +872,8 @@ describe("prepared model catalog builder", () => {
+@@ -819,6 +887,8 @@ describe("prepared model catalog builder", () => {
      });
  
      expect(snapshot.entries).toEqual([

@@ -22,7 +22,7 @@ patches/openclaw-2026.9.3-deterministic.patch
 SHA-256:
 
 ```text
-8e860efd0f1a46baea372984389aadf09f85e06f0a49d753805789841aaf2fb4
+91ebfa2498113d357328d2b2b784268cbaba7c3ba9c383735680244a955d1435
 ```
 
 It contains the 37-file deterministic, per-server MCP private-network and provider
