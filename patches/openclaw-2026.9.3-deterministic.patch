@@ -919,10 +919,10 @@ index 63d980c1..fd7f542e 100644
  
 diff --git a/src/commands/models/list.rows.activation.test.ts b/src/commands/models/list.rows.activation.test.ts
 new file mode 100644
-index 00000000..ec14a0d9
+index 00000000..6aec6c97
 --- /dev/null
 +++ b/src/commands/models/list.rows.activation.test.ts
-@@ -0,0 +1,236 @@
+@@ -0,0 +1,242 @@
 +/** Keeps configured model-list fanout on one provider activation per operation. */
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { AgentModelEntryConfig } from "../../config/types.agent-defaults.js";
@@ -960,6 +960,12 @@ index 00000000..ec14a0d9
 +      throw new Error("model-list projection must not activate a plugin registry");
 +    },
 +  });
++});
++
++vi.mock("../../plugins/provider-hook-runtime.js", async () => {
++  const { createProviderHookRuntime } = await import("../../plugins/provider-hook-runtime-core.js");
++  const providers = await import("../../plugins/providers.runtime.js");
++  return createProviderHookRuntime(providers);
 +});
 +
 +vi.mock("../../agents/prepared-model-catalog.js", () => ({
