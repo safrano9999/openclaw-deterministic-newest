@@ -2,7 +2,7 @@
 
 [![Pinned version](https://img.shields.io/badge/OpenClaw-2026.9.2-111827)](#version-pin)
 [![Patch](https://img.shields.io/badge/patch-dummy%2Fdummy%20%7C%20dummy%2Fnote-2563eb)](patches/openclaw-2026.9.2-deterministic.patch)
-[![Image chain](https://img.shields.io/badge/images-Fedora%2044%20latest-0ea5e9)](https://github.com/safrano9999/CONTAINER-newest/blob/main/NEWEST.md)
+[![Image chain](https://img.shields.io/badge/images-Fedora%2044%20latest-0ea5e9)](https://github.com/safrano9999/fedora-ai-safrano9999/blob/main/README.md)
 
 The independently maintained, exact deterministic gateway patch used by the
 Safrano OpenClaw newest image line. This repository is separate from the original
@@ -139,7 +139,7 @@ The distribution is intentionally split into three public repositories:
 | [openclaw-ephemeral-newest](https://github.com/safrano9999/openclaw-ephemeral-newest) | Python startup configuration |
 
 The current image integration starts at
-[CONTAINER-newest](https://github.com/safrano9999/CONTAINER-newest)'s Core layer:
+[fedora-ai-safrano9999](https://github.com/safrano9999/fedora-ai-safrano9999)'s Core layer:
 
 ```text
 ghcr.io/safrano9999/fedora44-ai-core-latest:latest
