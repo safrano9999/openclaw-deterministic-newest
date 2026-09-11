@@ -136,13 +136,13 @@ The distribution is intentionally split into three public repositories:
 |---|---|
 | [openclaw-deterministic-latest](https://github.com/safrano9999/openclaw-deterministic-latest) | This exact version-pinned patch |
 | [NOTE](https://github.com/safrano9999/NOTE) | Independent storage plugin for `dummy/note` |
-| [openclaw-ephemeral-latest](https://github.com/safrano9999/openclaw-ephemeral-latest) | Python startup configuration |
+| [openclaw-ephemeral](https://github.com/safrano9999/openclaw-ephemeral) | Python startup configuration |
 
 The current image integration starts at
 [fedora-ai-safrano9999](https://github.com/safrano9999/fedora-ai-safrano9999)'s Core layer:
 
 ```text
-ghcr.io/safrano9999/fedora44-ai-core-latest:latest
+ghcr.io/safrano9999/fedora44-ai-core:latest
 ```
 
 A standalone latest ephemeral image has not been published.
