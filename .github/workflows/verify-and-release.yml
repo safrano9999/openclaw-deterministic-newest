@@ -1,5 +1,5 @@
 # Source of truth: SCRIPTS/githubactions. Generated copies are overwritten.
-name: openclaw-deterministic-newest build_asset
+name: openclaw-deterministic-latest build_asset
 
 on:
   push:

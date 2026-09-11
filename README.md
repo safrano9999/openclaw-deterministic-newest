@@ -1,11 +1,11 @@
-# OpenClaw Deterministic Newest
+# OpenClaw Deterministic Latest
 
 [![Pinned version](https://img.shields.io/badge/OpenClaw-2026.9.3-111827)](#version-pin)
 [![Patch](https://img.shields.io/badge/patch-dummy%2Fdummy%20%7C%20dummy%2Fnote-2563eb)](patches/openclaw-2026.9.3-deterministic.patch)
 [![Image chain](https://img.shields.io/badge/images-Fedora%2044%20latest-0ea5e9)](https://github.com/safrano9999/fedora-ai-safrano9999/blob/main/README.md)
 
 The independently maintained, exact deterministic gateway patch used by the
-Safrano OpenClaw newest image line. This repository is separate from the original
+Safrano OpenClaw latest image line. This repository is separate from the original
 version-pinned distribution.
 
 This is a standalone public repository owned by `safrano9999`. It is not a
@@ -123,7 +123,7 @@ There is no automatic forward-port or compatibility layer. A newer OpenClaw
 version requires an explicit new patch and release.
 
 The pinned release target is
-[`2026.9.3-deterministic.1`](https://github.com/safrano9999/openclaw-deterministic-newest/releases/tag/2026.9.3-deterministic.1),
+[`2026.9.3-deterministic.1`](https://github.com/safrano9999/openclaw-deterministic-latest/releases/tag/2026.9.3-deterministic.1),
 with asset `openclaw-2026.9.3-deterministic.tar.gz` and its SHA-256 sidecar.
 The workflow uploads verification artifacts before optional release publication;
 manual dispatch defaults to `publish=false`.
@@ -134,9 +134,9 @@ The distribution is intentionally split into three public repositories:
 
 | Repository | Responsibility |
 |---|---|
-| [openclaw-deterministic-newest](https://github.com/safrano9999/openclaw-deterministic-newest) | This exact version-pinned patch |
+| [openclaw-deterministic-latest](https://github.com/safrano9999/openclaw-deterministic-latest) | This exact version-pinned patch |
 | [NOTE](https://github.com/safrano9999/NOTE) | Independent storage plugin for `dummy/note` |
-| [openclaw-ephemeral-newest](https://github.com/safrano9999/openclaw-ephemeral-newest) | Python startup configuration |
+| [openclaw-ephemeral-latest](https://github.com/safrano9999/openclaw-ephemeral-latest) | Python startup configuration |
 
 The current image integration starts at
 [fedora-ai-safrano9999](https://github.com/safrano9999/fedora-ai-safrano9999)'s Core layer:
@@ -145,7 +145,7 @@ The current image integration starts at
 ghcr.io/safrano9999/fedora44-ai-core-latest:latest
 ```
 
-A standalone newest ephemeral image has not been published.
+A standalone latest ephemeral image has not been published.
 
 ## License
 
