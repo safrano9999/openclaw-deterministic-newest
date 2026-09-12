@@ -1038,10 +1038,10 @@ index 63d980c1..fd7f542e 100644
  
 diff --git a/src/commands/models/list.rows.activation.test.ts b/src/commands/models/list.rows.activation.test.ts
 new file mode 100644
-index 00000000..29b78853
+index 00000000..030a7f36
 --- /dev/null
 +++ b/src/commands/models/list.rows.activation.test.ts
-@@ -0,0 +1,302 @@
+@@ -0,0 +1,305 @@
 +/** Keeps published model-list reads free of runtime activation and repeated policy scans. */
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { ModelsListParams } from "../../../packages/gateway-protocol/src/schema/agents-models-skills.js";
@@ -1078,7 +1078,8 @@ index 00000000..29b78853
 +// Published catalog reads must not materialize runtime providers. The separate
 +// provider activation tests cover preparation and operation-cache freshness.
 +vi.mock("../../plugins/providers.runtime.js", async () => {
-+  const { createProviderRegistryResolver } = await import("../../plugins/providers.runtime-core.js");
++  const { createProviderRegistryResolver } =
++    await import("../../plugins/providers.runtime-core.js");
 +  return createProviderRegistryResolver({
 +    resolveRuntimePluginRegistry: mocks.getRuntimePluginRegistryForLoadOptions,
 +    isPluginRegistryLoadInFlight: () => false,
@@ -1266,7 +1267,8 @@ index 00000000..29b78853
 +  await withPluginCache(operation, () =>
 +    withPluginMetadataSnapshotScope(
 +      metadataSnapshot,
-+      () => modelsListCommand({ all: view.all, provider: view.providerFilter, json: true }, runtime),
++      () =>
++        modelsListCommand({ all: view.all, provider: view.providerFilter, json: true }, runtime),
 +      { trustConfigIdentity: true },
 +    ),
 +  );
@@ -1286,7 +1288,8 @@ index 00000000..29b78853
 +  expect(normalizeResolvedModel).not.toHaveBeenCalled();
 +
 +  const expectedKeys = models.map((model) => `bench/${model.id}`);
-+  if (!view.providerFilter) {
++  // Default lists agent-configured refs; --all also includes provider inventory.
++  if (view.all && !view.providerFilter) {
 +    expectedKeys.push("other/other-model");
 +  }
 +  expect(rows.map((row) => row.key)).toEqual(expectedKeys);
@@ -1339,8 +1342,8 @@ index 00000000..29b78853
 +    const large = await renderConfiguredRows(16, view, includeDiscovery);
 +
 +    expect(small).toBeGreaterThan(0);
-+    // Four times as many refs may enlarge one activation scan, but must not
-+    // multiply it by the number of model rows sharing that same provider owner.
++    // Four times as many refs may enlarge policy preparation, but must not
++    // multiply its scans by the number of rows sharing the same provider owner.
 +    expect(large).toBeLessThanOrEqual(small * 5);
 +  });
 +});
@@ -1722,6 +1725,30 @@ index 84035b37..8a9e4527 100644
    const providerPluginResult = await maybeHandleProviderPluginSelection({
      selection: selectedValue,
      cfg,
+diff --git a/src/gateway/server-methods/models-list-result.ts b/src/gateway/server-methods/models-list-result.ts
+index 9ba247ce..ce236b12 100644
+--- a/src/gateway/server-methods/models-list-result.ts
++++ b/src/gateway/server-methods/models-list-result.ts
+@@ -440,11 +440,14 @@ export async function prepareModelsListResult(
+     cfg,
+     agentId,
+     defaultModel,
+-    canonicalizeRef: (ref) => ({
+-      ...ref,
+-      model:
+-        resolveProviderModelCatalogId({ provider: ref.provider, modelId: ref.model }) ?? ref.model,
+-    }),
++    canonicalizeRef: (ref) => {
++      const provider = normalizeProvider(ref.provider);
++      return {
++        ...ref,
++        provider,
++        model: resolveProviderModelCatalogId({ provider, modelId: ref.model }) ?? ref.model,
++      };
++    },
+     ...RUNTIME_MODEL_VISIBILITY_NORMALIZATION,
+     manifestPlugins: metadataSnapshot,
+   }).byKey;
 diff --git a/src/plugins/before-agent-reply.test.ts b/src/plugins/before-agent-reply.test.ts
 index 21e3921a..8525cfa4 100644
 --- a/src/plugins/before-agent-reply.test.ts
