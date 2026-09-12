@@ -132,8 +132,10 @@ git apply patches/openclaw-2026.9.4-deterministic.patch
 There is no automatic forward-port or compatibility layer. A newer OpenClaw
 version requires an explicit new patch and release.
 
+Provider policy preparation now reuses the existing plugin-cache generation across model catalog rows, including missing policies and snapshot-scoped aliases. Bundled-root selection changes invalidate these facts; model hooks still run for each model. The focused regression reproduces 402 inventory reads before the fix and two afterward.
+
 The pinned release target is
-[`2026.9.4-deterministic.1`](https://github.com/safrano9999/openclaw-deterministic-latest/releases/tag/2026.9.4-deterministic.1),
+[`2026.9.4-deterministic.2`](https://github.com/safrano9999/openclaw-deterministic-latest/releases/tag/2026.9.4-deterministic.2),
 with asset `openclaw-2026.9.4-deterministic.tar.gz` and its SHA-256 sidecar.
 The workflow uploads verification artifacts before optional release publication;
 manual dispatch defaults to `publish=false`.

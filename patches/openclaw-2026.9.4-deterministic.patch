@@ -1,3 +1,16 @@
+diff --git a/docs/plugins/architecture.md b/docs/plugins/architecture.md
+index 82f43e67..2f60165d 100644
+--- a/docs/plugins/architecture.md
++++ b/docs/plugins/architecture.md
+@@ -148,6 +148,8 @@ After startup, runtime readers reuse that inventory without filesystem discovery
+ 
+ Model-id normalization policies are prepared with each snapshot or narrowed view. Model selection, catalogs, and runtime normalization carry that view forward instead of rebuilding policies from its plugin list. An empty view remains authoritative and cannot inherit policies from a broader process snapshot.
+ 
++Provider model policy artifacts, including missing policies, are prepared once per provider and selected snapshot within the same cache generation. A changed bundled-root selection invalidates those prepared facts. Each model still runs its own normalization and route hooks.
++
+ The snapshot and lookup table keep repeated startup decisions on the fast path:
+ 
+ - channel ownership
 diff --git a/scripts/lib/vitest-worker-compiler.mts b/scripts/lib/vitest-worker-compiler.mts
 index 554ed4a1..b0246fa5 100644
 --- a/scripts/lib/vitest-worker-compiler.mts
@@ -2014,6 +2027,226 @@ index 216a4f12..d831d063 100644
  };
  
  export type PluginHookBeforeAgentReplyResult = {
+diff --git a/src/plugins/plugin-cache-metadata.ts b/src/plugins/plugin-cache-metadata.ts
+index 7e4ea776..eb1578d0 100644
+--- a/src/plugins/plugin-cache-metadata.ts
++++ b/src/plugins/plugin-cache-metadata.ts
+@@ -10,6 +10,7 @@ import type {
+ import type { ManifestModelSuppressionResolver } from "./manifest-model-suppression.types.js";
+ import type { PluginManifestRecord } from "./manifest-registry.types.js";
+ import type { PluginMetadataSnapshot } from "./plugin-metadata-snapshot.types.js";
++import type { BundledProviderPolicySurface } from "./provider-policy-surface.js";
+ 
+ type CurrentPluginMetadataCacheState = {
+   snapshot: unknown;
+@@ -27,6 +28,11 @@ export type PluginCacheMetadata = {
+   metadata: {
+     bundledPluginsDir?: { key: string; value: string | undefined };
+     bundledDiscoveryMode?: { value: "compat" | "allowlist" | undefined };
++    providerModelPolicies?: {
++      selectorKey: string | undefined;
++      direct: Map<string, BundledProviderPolicySurface | null>;
++      bySnapshot: WeakMap<object, Map<string, BundledProviderPolicySurface | null>>;
++    };
+     current: CurrentPluginMetadataCacheState;
+     snapshots: Map<string, PluginMetadataSnapshot>;
+     discovery: Map<string, PluginDiscoveryResult>;
+diff --git a/src/plugins/provider-model-routes.cache.test.ts b/src/plugins/provider-model-routes.cache.test.ts
+new file mode 100644
+index 00000000..95cac886
+--- /dev/null
++++ b/src/plugins/provider-model-routes.cache.test.ts
+@@ -0,0 +1,126 @@
++import fs from "node:fs";
++import path from "node:path";
++import { afterEach, describe, expect, it, vi } from "vitest";
++import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
++import { resolveModelCatalogIdentityKey } from "../agents/openai-model-routes.js";
++import { withEnv } from "../test-utils/env.js";
++import { withPluginMetadataSnapshotScope } from "./current-plugin-metadata-snapshot.js";
++import {
++  bindPluginMetadataSnapshotCache,
++  createPluginCache,
++  withPluginCache,
++} from "./plugin-cache.js";
++import { createPluginMetadataSnapshotFixture } from "./plugin-metadata.test-support.js";
++import * as policySurface from "./provider-policy-surface.js";
++
++const temporary = useAutoCleanupTempDirTracker(afterEach);
++afterEach(() => vi.restoreAllMocks());
++
++function fixture() {
++  const bundled = temporary.make("provider-policy-catalog-");
++  for (const id of ["first", "second"]) {
++    const root = path.join(bundled, id);
++    fs.mkdirSync(root);
++    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: id, type: "module" }));
++    fs.writeFileSync(
++      path.join(root, "provider-policy-api.js"),
++      `export const normalizeModelCatalogId = ({ modelId }) => ${JSON.stringify(id + ":")} + modelId;`,
++    );
++  }
++  return {
++    env: { OPENCLAW_BUNDLED_PLUGINS_DIR: bundled, OPENCLAW_TEST_TRUST_BUNDLED_PLUGINS_DIR: "1" },
++    snapshot: (id?: string) =>
++      createPluginMetadataSnapshotFixture({
++        plugins: id
++          ? [{ id, rootDir: path.join(bundled, id), providers: ["fixture-provider"] }]
++          : [],
++      }),
++  };
++}
++
++describe("catalog identity policy preparation", () => {
++  const identity = (id: string, provider = "fixture-provider") =>
++    JSON.parse(resolveModelCatalogIdentityKey({ provider, id }));
++
++  it("prepares each provider once across distinct catalog rows without caching model hooks", () => {
++    const setup = fixture();
++    const original = setup.snapshot("first");
++    const inventory = vi.fn(() => original.plugins);
++    const snapshot = {
++      ...original,
++      get plugins() {
++        return inventory();
++      },
++    };
++    const artifacts = vi.spyOn(policySurface, "resolveDirectBundledProviderPolicySurface");
++    withEnv(setup.env, () =>
++      withPluginCache(createPluginCache(), () =>
++        withPluginMetadataSnapshotScope(snapshot, () => {
++          expect(identity("warm")).toEqual(["fixture-provider", "first:warm"]);
++          expect(identity("warm", "missing-provider")).toEqual(["missing-provider", "warm"]);
++          const reads = inventory.mock.calls.length;
++          const loads = artifacts.mock.calls.length;
++          for (let i = 0; i < 200; i += 1) {
++            expect(identity(`model-${i}`)).toEqual(["fixture-provider", `first:model-${i}`]);
++            expect(identity(`model-${i}`, "missing-provider")).toEqual([
++              "missing-provider",
++              `model-${i}`,
++            ]);
++          }
++          expect(inventory).toHaveBeenCalledTimes(reads);
++          expect(artifacts).toHaveBeenCalledTimes(loads);
++        }),
++      ),
++    );
++  });
++
++  it("keeps empty views separate and observes changed owners in a new generation", () => {
++    const setup = fixture();
++    const first = setup.snapshot("first");
++    const empty = setup.snapshot();
++    const owner = createPluginCache();
++    bindPluginMetadataSnapshotCache(first, owner);
++    bindPluginMetadataSnapshotCache(empty, owner);
++    withEnv(setup.env, () => {
++      withPluginCache(owner, () => {
++        withPluginMetadataSnapshotScope(empty, () =>
++          expect(identity("demo")).toEqual(["fixture-provider", "demo"]),
++        );
++        withPluginMetadataSnapshotScope(first, () =>
++          expect(identity("demo")).toEqual(["fixture-provider", "first:demo"]),
++        );
++        withPluginMetadataSnapshotScope(empty, () =>
++          expect(identity("demo")).toEqual(["fixture-provider", "demo"]),
++        );
++      });
++      withPluginCache(createPluginCache(), () =>
++        withPluginMetadataSnapshotScope(setup.snapshot("second"), () =>
++          expect(identity("demo")).toEqual(["fixture-provider", "second:demo"]),
++        ),
++      );
++      withPluginCache(owner, () =>
++        withPluginMetadataSnapshotScope(first, () =>
++          expect(identity("demo")).toEqual(["fixture-provider", "first:demo"]),
++        ),
++      );
++    });
++  });
++
++  it("invalidates cached hits and misses when bundled discovery is disabled and restored", () => {
++    const setup = fixture();
++    withEnv(setup.env, () =>
++      withPluginCache(createPluginCache(), () =>
++        withPluginMetadataSnapshotScope(setup.snapshot("first"), () => {
++          expect(identity("demo")).toEqual(["fixture-provider", "first:demo"]);
++          expect(identity("demo", "first")).toEqual(["first", "first:demo"]);
++          withEnv({ OPENCLAW_DISABLE_BUNDLED_PLUGINS: "1" }, () => {
++            expect(identity("demo")).toEqual(["fixture-provider", "demo"]);
++            expect(identity("demo", "first")).toEqual(["first", "demo"]);
++          });
++          expect(identity("demo")).toEqual(["fixture-provider", "first:demo"]);
++          expect(identity("demo", "first")).toEqual(["first", "first:demo"]);
++        }),
++      ),
++    );
++  });
++});
+diff --git a/src/plugins/provider-model-routes.ts b/src/plugins/provider-model-routes.ts
+index b146f260..b9fd4b4c 100644
+--- a/src/plugins/provider-model-routes.ts
++++ b/src/plugins/provider-model-routes.ts
+@@ -13,6 +13,8 @@ import type {
+   ProviderModelRouteSource,
+   ProviderRouteOverridePresence,
+ } from "../plugin-sdk/provider-model-types.js";
++import { resolveBundledPluginsDir } from "./bundled-dir.js";
++import { getPluginCache } from "./plugin-cache.js";
+ import { getCurrentPluginMetadataSnapshotRequiredRuntime } from "./plugin-metadata-snapshot-required.js";
+ import type { PluginMetadataSnapshot } from "./plugin-metadata-snapshot.types.js";
+ import {
+@@ -36,7 +38,21 @@ export function resolveProviderModelPolicySurface(
+   metadataSnapshot?: Pick<PluginMetadataSnapshot, "plugins">,
+ ) {
+   const provider = normalizeProviderId(providerId);
+-  const bundled = resolveDirectBundledProviderPolicySurface(provider);
++  // Reuse the selection owner's token so env/root changes invalidate both hits
++  // and misses without repeating artifact preparation for every catalog row.
++  resolveBundledPluginsDir();
++  const cache = getPluginCache().metadata;
++  const selectorKey = cache.bundledPluginsDir?.key;
++  let policies = cache.providerModelPolicies;
++  if (!policies || policies.selectorKey !== selectorKey) {
++    policies = { selectorKey, direct: new Map(), bySnapshot: new WeakMap() };
++    cache.providerModelPolicies = policies;
++  }
++  let bundled = policies.direct.get(provider);
++  if (bundled === undefined) {
++    bundled = resolveDirectBundledProviderPolicySurface(provider);
++    policies.direct.set(provider, bundled);
++  }
+   if (bundled) {
+     return bundled;
+   }
+@@ -46,11 +62,22 @@ export function resolveProviderModelPolicySurface(
+       allowScopedSnapshot: true,
+       allowWorkspaceScopedSnapshot: true,
+     });
+-  return metadata
+-    ? resolveProviderPolicySurface(provider, {
+-        manifestRegistry: { plugins: [...metadata.plugins] },
+-      })
+-    : null;
++  if (!metadata) {
++    return null;
++  }
++  let selected = policies.bySnapshot.get(metadata);
++  if (!selected) {
++    selected = new Map();
++    policies.bySnapshot.set(metadata, selected);
++  }
++  let surface = selected.get(provider);
++  if (surface === undefined) {
++    surface = resolveProviderPolicySurface(provider, {
++      manifestRegistry: { plugins: [...metadata.plugins] },
++    });
++    selected.set(provider, surface);
++  }
++  return surface;
+ }
+ 
+ /** Binds one provider's identity facts for an authored-row lookup. */
 diff --git a/src/plugins/providers.runtime-core.ts b/src/plugins/providers.runtime-core.ts
 index 7ecab47d..6d04da9d 100644
 --- a/src/plugins/providers.runtime-core.ts
