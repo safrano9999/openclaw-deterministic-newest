@@ -22,7 +22,7 @@ patches/openclaw-2026.9.4-deterministic.patch
 SHA-256:
 
 ```text
-0e02f43f7be7ce0aeed8143fd0952da94935cc71a45ff6c248d44cfd6365582a
+6e5523de3f188e4e461059bc51cf2dea17f998e6014b24513abaf9b592c865d7
 ```
 
 It contains the 37-file deterministic, per-server MCP private-network and provider
@@ -49,6 +49,9 @@ The 2026.9.4 port reuses the operation-scoped activation projection in upstream'
 source-config validation, and retained registry checks. Catalog imports and
 postbuild fixtures follow their current owners; route tests still verify the
 upstream identities and entitlements alongside both deterministic models.
+The model-list regression follows the published catalog through `models.list`
+and the CLI, checking preserved rows and bounded policy scans without runtime
+provider activation during a read.
 Deterministic turns continue to skip model-backed compaction and memory flush.
 The release workflow verifies the exact upstream base, runs the existing focused
 contract tests, builds the runtime, and checks packaged imports before publishing.

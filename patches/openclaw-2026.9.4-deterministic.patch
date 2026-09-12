@@ -1038,15 +1038,25 @@ index 63d980c1..fd7f542e 100644
  
 diff --git a/src/commands/models/list.rows.activation.test.ts b/src/commands/models/list.rows.activation.test.ts
 new file mode 100644
-index 00000000..6aec6c97
+index 00000000..29b78853
 --- /dev/null
 +++ b/src/commands/models/list.rows.activation.test.ts
-@@ -0,0 +1,242 @@
-+/** Keeps configured model-list fanout on one provider activation per operation. */
+@@ -0,0 +1,302 @@
++/** Keeps published model-list reads free of runtime activation and repeated policy scans. */
 +import { afterEach, describe, expect, it, vi } from "vitest";
++import type { ModelsListParams } from "../../../packages/gateway-protocol/src/schema/agents-models-skills.js";
++import * as modelAuth from "../../agents/model-auth-availability.js";
++import type { ModelCatalogEntry, ModelCatalogSnapshot } from "../../agents/model-catalog.types.js";
++import * as runtimeConfig from "../../config/config.js";
 +import type { AgentModelEntryConfig } from "../../config/types.agent-defaults.js";
 +import type { ModelDefinitionConfig, ModelProviderConfig } from "../../config/types.models.js";
 +import type { OpenClawConfig } from "../../config/types.openclaw.js";
++import * as gateway from "../../gateway/call.js";
++import {
++  buildModelsListResult,
++  createGatewayAgentModelCatalogProjector,
++} from "../../gateway/server-methods/models-list-result.js";
++import type { GatewayRequestContext } from "../../gateway/server-methods/types.js";
 +import { withPluginMetadataSnapshotScope } from "../../plugins/current-plugin-metadata-snapshot.js";
 +import {
 +  bindPluginMetadataSnapshotCache,
@@ -1058,18 +1068,15 @@ index 00000000..6aec6c97
 +import { createEmptyPluginRegistry } from "../../plugins/registry-empty.js";
 +import { resetPluginRuntimeStateForTest } from "../../plugins/runtime.js";
 +import type { ProviderPlugin } from "../../plugins/types.js";
-+import { resolveConfiguredEntries } from "./list.configured.js";
-+import type { RowBuilderContext } from "./list.row-context.js";
-+import { appendAllModelRowSources, appendConfiguredModelRowSources } from "./list.row-sources.js";
++import { modelsListCommand } from "./list.list-command.js";
 +import type { ModelRow } from "./list.types.js";
-+import { createModelCatalogProviderAliasCanonicalizer } from "./provider-aliases.js";
 +
 +const mocks = vi.hoisted(() => ({
 +  getRuntimePluginRegistryForLoadOptions: vi.fn(),
 +}));
 +
-+// The actual provider resolution and auto-enable path runs against tiny metadata;
-+// only executable plugin materialization and unrelated catalog I/O are replaced.
++// Published catalog reads must not materialize runtime providers. The separate
++// provider activation tests cover preparation and operation-cache freshness.
 +vi.mock("../../plugins/providers.runtime.js", async () => {
 +  const { createProviderRegistryResolver } = await import("../../plugins/providers.runtime-core.js");
 +  return createProviderRegistryResolver({
@@ -1086,10 +1093,6 @@ index 00000000..6aec6c97
 +  const providers = await import("../../plugins/providers.runtime.js");
 +  return createProviderHookRuntime(providers);
 +});
-+
-+vi.mock("../../agents/prepared-model-catalog.js", () => ({
-+  loadPreparedModelCatalogSnapshot: async () => ({ entries: [], routeVariants: [] }),
-+}));
 +
 +vi.mock("../../plugins/provider-public-artifacts.js", () => ({
 +  resolveBundledProviderPolicySurface: () => null,
@@ -1174,17 +1177,16 @@ index 00000000..6aec6c97
 +    ...(includeDiscovery ? { discovery: { candidates: [], diagnostics: [] } } : {}),
 +  };
 +  const registry = createEmptyPluginRegistry();
++  const normalizeResolvedModel = vi.fn(() => {
++    throw new Error("Published rows must not repeat runtime model normalization");
++  });
 +  for (const providerId of ["bench", "other"]) {
 +    const provider: ProviderPlugin = {
 +      id: providerId,
 +      label: providerId,
 +      aliases: providerId === "bench" ? ["bench-alias"] : [],
 +      auth: [],
-+      normalizeResolvedModel: ({ model }) => ({
-+        ...model,
-+        name: `Normalized ${model.id}`,
-+        contextTokens: 32_000,
-+      }),
++      normalizeResolvedModel,
 +    };
 +    registry.providers.push({
 +      pluginId: `${providerId}-plugin`,
@@ -1193,38 +1195,95 @@ index 00000000..6aec6c97
 +    });
 +  }
 +  mocks.getRuntimePluginRegistryForLoadOptions.mockReturnValue(registry);
-+  const canonicalizer = createModelCatalogProviderAliasCanonicalizer({ cfg, metadataSnapshot });
-+  const { entries } = resolveConfiguredEntries(cfg, metadataSnapshot);
-+  const evaluateModelAuth = vi.fn(() => ({ availability: true, routeResolution: null }));
-+  const context: RowBuilderContext = {
-+    cfg,
-+    agentDir: "/tmp/openclaw-model-list-agent",
-+    workspaceDir: "/tmp/openclaw-model-list-workspace",
-+    metadataSnapshot,
-+    authIndex: { evaluateModelAuth },
-+    canonicalizeProvider: canonicalizer.provider,
-+    configuredByKey: new Map(entries.map((entry) => [entry.key, entry])),
-+    discoveredKeys: new Set(),
-+    filter: {
-+      provider: view.providerFilter ? canonicalizer.provider(view.providerFilter) : undefined,
++  // The published owner already holds normalized runtime facts; list reads must
++  // preserve them without running normalizeResolvedModel again for every row.
++  const entries: ModelCatalogEntry[] = [
++    ...models.map((model, providerOrder) => ({
++      ...model,
++      provider: "bench",
++      providerOrder,
++      api: providerConfig.api,
++      baseUrl: providerConfig.baseUrl,
++      contextTokens: 32_000,
++    })),
++    {
++      ...createConfiguredModel("other-model"),
++      provider: "other",
++      providerOrder: 0,
++      api: providerConfig.api,
++      baseUrl: providerConfig.baseUrl,
++      contextTokens: 32_000,
 +    },
++  ];
++  const snapshot: ModelCatalogSnapshot = { entries, routeVariants: entries };
++  const evaluateModelAuth = vi.fn(() => ({ availability: true, routeResolution: null }));
++  vi.spyOn(modelAuth, "createModelAuthAvailabilityResolver").mockReturnValue({
++    evaluateRuntimeModelAuth: evaluateModelAuth,
++    evaluateModelAuth,
++    providerDiscoveryProviderIds: [],
++    resolveProviderAuthAvailability: () => true,
++    hasSyntheticAuth: () => false,
++  });
++  vi.spyOn(runtimeConfig, "getRuntimeConfig").mockReturnValue(cfg);
++  vi.spyOn(gateway, "isImplicitLocalGatewayTarget").mockResolvedValue(false);
++  const context = {
++    getRuntimeConfig: () => cfg,
++    loadGatewayModelCatalogSnapshot: vi.fn(() => {
++      throw new Error("Published projection must not discover a second catalog");
++    }),
++    logGateway: { debug: vi.fn() },
++  } as unknown as GatewayRequestContext;
++  const projector = createGatewayAgentModelCatalogProjector({
++    cfg,
++    agentId: "main",
++    snapshot,
++    metadataSnapshot,
++    preparedAuthStore: { version: 1, profiles: {} },
++    pluginRegistry: registry,
++    isCurrent: () => true,
++  });
++  vi.spyOn(gateway, "callGateway").mockImplementation(
++    async <T>(request: Parameters<typeof gateway.callGateway>[0]) =>
++      (await buildModelsListResult({
++        source: { kind: "gateway", context },
++        agentId: "main",
++        params: request.params as ModelsListParams,
++        preloadedCatalog: { agentId: "main", config: cfg, snapshot },
++        preloadedOnly: true,
++        catalogProjector: projector,
++      })) as T,
++  );
++  const runtime = {
++    log: vi.fn(),
++    error: vi.fn(),
++    exit: vi.fn(),
++    writeJson: vi.fn(),
++    writeStdout: vi.fn(),
 +  };
-+  const rows: ModelRow[] = [];
 +  const operation = createPluginCache();
 +  bindPluginMetadataSnapshotCache(metadataSnapshot, operation);
++  mocks.getRuntimePluginRegistryForLoadOptions.mockClear();
 +  await withPluginCache(operation, () =>
 +    withPluginMetadataSnapshotScope(
 +      metadataSnapshot,
-+      async () => {
-+        if (view.all) {
-+          await appendAllModelRowSources({ rows, entries, context });
-+        } else {
-+          await appendConfiguredModelRowSources({ rows, entries, context });
-+        }
-+      },
++      () => modelsListCommand({ all: view.all, provider: view.providerFilter, json: true }, runtime),
 +      { trustConfigIdentity: true },
 +    ),
 +  );
++  expect(runtime.writeJson).toHaveBeenCalledOnce();
++  const rows = runtime.writeJson.mock.calls[0]![0].models as ModelRow[];
++  expect(gateway.callGateway).toHaveBeenCalledWith(
++    expect.objectContaining({
++      method: "models.list",
++      params: expect.objectContaining({
++        view: view.all || view.providerFilter ? "all" : "default",
++        includeDetails: true,
++        ...(view.providerFilter ? { provider: view.providerFilter } : {}),
++      }),
++    }),
++  );
++  expect(mocks.getRuntimePluginRegistryForLoadOptions).not.toHaveBeenCalled();
++  expect(normalizeResolvedModel).not.toHaveBeenCalled();
 +
 +  const expectedKeys = models.map((model) => `bench/${model.id}`);
 +  if (!view.providerFilter) {
@@ -1239,7 +1298,6 @@ index 00000000..6aec6c97
 +        contextWindow: 64_000,
 +        contextTokens: 32_000,
 +        available: true,
-+        missing: false,
 +      }),
 +    ),
 +  );
@@ -1247,14 +1305,16 @@ index 00000000..6aec6c97
 +  expect(rows[1]?.tags).toEqual(["fallback#1", "configured"]);
 +  if (view.replace) {
 +    expect(evaluateModelAuth).toHaveBeenCalledWith(
-+      "bench-alias",
++      "bench",
 +      expect.objectContaining({ modelId: "model-0" }),
 +    );
 +  }
++  vi.restoreAllMocks();
 +  return policyMapScans;
 +}
 +
 +afterEach(() => {
++  vi.restoreAllMocks();
 +  clearPluginMetadataLifecycleCaches();
 +  resetPluginRuntimeStateForTest();
 +  vi.clearAllMocks();
